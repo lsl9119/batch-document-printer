@@ -704,7 +704,7 @@ class MainWindow:
         self.lbl_sumatra.config(text=f"SumatraPDF {'✓' if report.sumatra_ok else '✗'}")
         problems = report.problems()
         if problems:
-            first = problems[0] if len(problems[0]) <= 36 else problems[0][:35] + "…"
+            first = problems[0] if len(problems[0]) <= 26 else problems[0][:25] + "…"
             more = f" 等 {len(problems)} 项" if len(problems) > 1 else ""
             self.lbl_env_warning.config(text=f"⚠ {first}{more}（点击查看诊断）")
         else:
