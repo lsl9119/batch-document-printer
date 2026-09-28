@@ -1,13 +1,17 @@
 <#
-创建一个用于验证打印链路的虚拟打印机（不消耗纸张）：
-  打印机名: BDP Test PDF
-  驱动:     Microsoft Print To PDF
-  端口:     本地文件端口（每个打印作业都写入同一个 PDF 文件，无需弹出"另存为"对话框）
+Create a virtual printer for verifying the print pipeline without using paper:
+  Printer name: BDP Test PDF
+  Driver:       Microsoft Print To PDF
+  Port:         a local file port (every job is written to the same PDF file,
+                so no "Save As" dialog is shown)
 
-需要管理员权限运行：
+Run as administrator:
   powershell -ExecutionPolicy Bypass -File scripts\setup_test_pdf_printer.ps1 -OutputFile C:\bdp_test\out.pdf
-删除：
+Remove:
   Remove-Printer -Name "BDP Test PDF"; Remove-PrinterPort -Name C:\bdp_test\out.pdf
+
+(This file is intentionally ASCII-only: Windows PowerShell 5.1 reads BOM-less
+ scripts with the ANSI code page, which breaks non-ASCII text.)
 #>
 param(
     [string]$PrinterName = "BDP Test PDF",
@@ -18,7 +22,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path $OutputFile) | Out-Null
 
 $driver = Get-PrinterDriver -Name "Microsoft Print To PDF" -ErrorAction SilentlyContinue
 if (-not $driver) {
-    Write-Host "未找到 Microsoft Print To PDF 驱动，尝试启用 Windows 功能..."
+    Write-Host "Driver 'Microsoft Print To PDF' not found, enabling the Windows feature..."
     Enable-WindowsOptionalFeature -Online -FeatureName "Printing-PrintToPDFServices-Features" -All -NoRestart | Out-Null
 }
 if (-not (Get-PrinterPort -Name $OutputFile -ErrorAction SilentlyContinue)) {
