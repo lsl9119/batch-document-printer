@@ -41,9 +41,9 @@ Annotations [
 	DefaultAuthor = 
 ]
 
-RememberOpenedFiles = true
+RememberOpenedFiles = false
 RememberStatePerDocument = true
-RestoreSession = true
+RestoreSession = false
 UiLanguage = cn
 EnableTeXEnhancements = false
 DefaultDisplayMode = automatic
@@ -67,7 +67,7 @@ TabWidth = 300
 TreeFontSize = 0
 SmoothScroll = false
 ShowStartPage = true
-CheckForUpdates = true
+CheckForUpdates = false
 WindowState = 1
 WindowPos = 0 0 0 0
 UseTabs = true

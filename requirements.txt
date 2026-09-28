@@ -1,22 +1,17 @@
-# GUI框架
-tkinter-tooltip==3.1.2
+# ===== Runtime dependencies (keep this file ASCII-only: pip on Windows reads it with the ANSI code page) =====
+# GUI drag & drop
 tkinterdnd2==0.3.0
 
-# Windows API支持
-pywin32==306
-comtypes==1.2.1
+# Windows API / COM (both WPS Office and Microsoft Office are driven through pywin32 COM)
+pywin32==308; sys_platform == "win32"
+# Process tracking: only WPS processes started by this program are ever terminated
+psutil==6.1.1
 
-# 文档处理库
-python-docx==1.1.0
-python-pptx==0.6.23
+# Page counting / export
+python-pptx==1.0.2
 PyPDF2==3.0.1
-xlwings==0.32.0
+Pillow==11.1.0
+openpyxl==3.1.5
 
-# 图片处理库（多页TIFF页数统计、文件验证、图片信息获取）
-Pillow>=9.0.0
-
-# Excel导出支持（可选）
-openpyxl>=3.1.0
-
-# 打包工具
-PyInstaller==6.3.0 
+# Note: xlwings (Microsoft Excel only) and comtypes used by v5.x are no longer needed;
+#       spreadsheets and presentations are printed through WPS COM (KET/KWPP.Application).

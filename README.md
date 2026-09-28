@@ -1,581 +1,248 @@
-# 办公文档批量打印器
+# Batch Document Printer – WPS Edition
 
-> 🚀 **最新版本**: v5.0.0 | 📥 **[立即下载](https://github.com/icescat/batch-document-printer/releases/latest)** | 🌟 **[GitHub 仓库](https://github.com/icescat/batch-document-printer)**
+> 办公文档批量打印器 · WPS 版 · v1.0.0
+>
+> Windows + WPS Office 批量打印工具：**只安装 WPS Office、不安装 Microsoft Office**，也能把
+> 文字、表格、演示、PDF、图片、文本一次性批量打印出去。
 
-## 项目概括
+- 下载：[Releases 页面](https://github.com/lsl9119/batch-document-printer/releases)（`BatchDocumentPrinter-WPS-v1.0.0.zip`，解压即用，无需安装 Python）
+- 许可证：MIT（保留原项目作者信息，见 [LICENSE](LICENSE) / [NOTICE](NOTICE)）
+- 基于 [icescat/batch-document-printer](https://github.com/icescat/batch-document-printer)（作者：喵言喵语）二次开发
 
-本项目基于Python 3.12，采用**策略模式+注册器模式的模块化处理器架构**，支持批量打印多种文档格式：Word、PowerPoint、Excel、PDF、图片和文本文件。提供直观的图形用户界面，支持拖拽导入、智能文件类型过滤、精确页数统计、WPS格式兼容、灵活打印设置等功能，能显著提升办公文档打印效率。
+---
 
-## 🏗️ 架构设计
+## 软件介绍
 
-### 核心架构 - 模块化处理器模式
+原项目通过 `Word.Application` / `xlwings` / `PowerPoint.Application` 调用 Microsoft Office，
+在只装了 WPS 的电脑上 Office 文档无法打印。WPS 版把 **WPS Office 作为一等公民**：
 
-### 🔧 技术选型
+- 新增统一的 Office Backend 层（`src/backends/`），通过 WPS 的 COM 接口直接控制
+  WPS 文字 `KWPS.Application`、WPS 表格 `KET.Application`、WPS 演示 `KWPP.Application`
+- 表格不再依赖 xlwings（它只支持 Microsoft Excel），直接通过 `KET.Application` 打印整个工作簿
+- WPS 演示 `PrintOptions.ActivePrinter` 不可写时，临时切换 Windows 默认打印机，
+  `finally` 中恢复，程序崩溃后下次启动也会自动恢复
+- 批量稳定性：WPS 实例复用、单文件失败不中断队列、卡死超时自动结束**本程序启动的** WPS 进程、
+  批次结束清理进程、详细打印日志
+- 未安装 WPS 时可自动回退到 Microsoft Office（可在设置中限定“仅 WPS”）
 
-- **主要编程语言**: Python 3.12+
-- **GUI框架**: tkinter, tkinterdnd2 (拖拽支持)
-- **架构模式**: 策略模式 + 注册器模式 + 插件化架构
-- **文档处理库**:
-  - python-docx (Word文档处理)
-  - python-pptx (PowerPoint处理)
-  - xlwings (Excel处理，精确页数统计)
-  - PyPDF2/pypdf (PDF处理)
-  - comtypes/pywin32 (Windows COM接口，用于调用Office应用)
-- **打印控制**: win32print, win32api (Windows打印API)
-- **应用打包**: PyInstaller (生成独立exe文件)
-- **文件操作**: pathlib, os (文件系统操作)
-- **版本控制**: Git
-- **其他工具**:
-  - pytest (单元测试)
-  - black (代码格式化)
-  - cx_Freeze 或 auto-py-to-exe (备选打包方案)
+## 截图
 
-## 📁 项目结构 / 模块划分
+![主界面](docs/images/main_window.png)
 
-### v5.0 完整架构目录结构
+> 说明：截图由打包后的 `BatchDocumentPrinter-WPS.exe` 在 Linux + Wine 环境中渲染（开发环境没有 Windows 桌面），
+> 因此显示“未检测到 WPS”。在 Windows 上界面为系统原生风格，检测到 WPS 时状态栏显示
+> `Office Backend: WPS Office ✓  WPS 文字 ✓  WPS 表格 ✓  WPS 演示 ✓`。
 
-```text
-printer/
-├── src/
-│   ├── handlers/                    # 🆕 文档处理器模块 (核心架构)
-│   │   ├── __init__.py              # 处理器导出
-│   │   ├── base_handler.py          # 基础处理器接口
-│   │   ├── handler_registry.py      # 处理器注册中心
-│   │   ├── pdf_handler.py           # PDF文档处理器
-│   │   ├── word_handler.py          # Word文档处理器
-│   │   ├── powerpoint_handler.py    # PowerPoint文档处理器
-│   │   ├── excel_handler.py         # Excel文档处理器
-│   │   ├── image_handler.py         # 图片文档处理器
-│   │   ├── text_handler.py          # 文本文档处理器
-│   │   └── print_utils.py           # 打印工具类
-│   ├── gui/                         # 图形用户界面模块
-│   │   ├── components/              # GUI功能组件
-│   │   │   ├── __init__.py          # 组件导出
-│   │   │   ├── file_import_handler.py    # 文件导入功能处理器
-│   │   │   ├── list_operation_handler.py # 列表操作功能处理器
-│   │   │   ├── window_manager.py         # 窗口管理器
-│   │   │   └── tooltip.py                # 浮窗提示组件
-│   │   ├── main_window.py           # 主窗口界面 (纯界面层)
-│   │   ├── print_settings_dialog.py # 打印设置对话框
-│   │   └── page_count_dialog.py     # 页数统计对话框
-│   ├── core/                        # 核心业务逻辑模块 (重构)
-│   │   ├── document_manager.py      # 文档管理器
-│   │   ├── print_controller.py      # 基于处理器架构
-│   │   ├── page_count_manager.py    # 基于处理器架构
-│   │   ├── settings_manager.py      # 设置管理器
-│   │   ├── printer_config_manager.py # 打印机配置管理器
-│   │   └── models.py                # 数据模型定义
-│   └── utils/                       # 工具类和辅助函数
-│       └── config_utils.py          # 配置文件操作
-├── data/                            # 应用数据存储目录
-├── resources/                       # 资源文件目录
-│   └── app_icon.ico                 # 应用程序图标
-├── main.py                         # 程序入口点
-├── requirements.txt                # Python依赖管理
-├── build_v5.0.bat                  # v5.0构建脚本
-├── 办公文档批量打印器v5.0.spec      # PyInstaller打包配置
-└── README.md                       # 项目文档
-```
+## 支持格式
 
-### 架构分层说明
+| 类型 | 扩展名 | 打印引擎 | 需要 WPS/Office |
+|------|--------|----------|-----------------|
+| PDF | `.pdf` | 内置 SumatraPDF | 否 |
+| 文字 | `.doc` `.docx` `.wps` | WPS 文字 `KWPS.Application` | 是（WPS 优先） |
+| 表格 | `.xls` `.xlsx` `.et` | WPS 表格 `KET.Application` | 是（WPS 优先） |
+| 演示 | `.ppt` `.pptx` `.dps` | WPS 演示 `KWPP.Application` | 是（WPS 优先） |
+| 图片 | `.jpg` `.jpeg` `.png` `.bmp` `.tiff` `.tif` `.webp` | SumatraPDF（备用：Windows GDI） | 否 |
+| 文本 | `.txt`（UTF-8 / GBK / UTF-16 自动识别） | Windows GDI 直接打印（备用：记事本） | 否 |
+
+## 系统要求
+
+- Windows 10 / Windows 11（64 位）
+- WPS Office（个人版 / 专业版，需要 COM 接口可用，见下文“WPS COM 诊断”）
+- **Microsoft Office 非必需**（未安装 WPS 时可作为备用引擎）
+- 打印 PDF、图片、文本不需要 WPS 或 Office
+- 普通用户权限即可运行，无需安装 Python / pip / Git / Visual Studio
+
+## 安装
+
+1. 从 Releases 下载 `BatchDocumentPrinter-WPS-v1.0.0.zip`，并用 `SHA256SUMS.txt` 校验（可选）：
+   `certutil -hashfile BatchDocumentPrinter-WPS-v1.0.0.zip SHA256`
+2. 解压到任意目录（建议不要放在 `C:\Program Files`，以便程序在自身目录保存配置和日志）
+3. 双击 `BatchDocumentPrinter-WPS.exe`
+
+程序目录结构：
 
 ```text
-📋 v5.0 完整分层架构
-┌─────────────────────────────────────────────────────────┐
-│                    应用入口层                            │
-│  main.py - 程序启动入口和系统初始化                     │
-├─────────────────────────────────────────────────────────┤
-│                    GUI界面层                            │
-│  主界面   │  设置对话框  │  页数统计对话框  │  帮助界面    │
-├─────────────────────────────────────────────────────────┤
-│                 GUI功能处理器层 🆕                       │
-│ FileImportHandler │ ListOperationHandler │ WindowManager │
-├─────────────────────────────────────────────────────────┤
-│                   核心业务逻辑层                         │
-│ DocumentManager │ PrintController │ SettingsManager     │
-├─────────────────────────────────────────────────────────┤
-│                 文档处理器层 🆕                          │
-│ WordHandler │ PDFHandler │ PPTHandler │ ExcelHandler │ ImageHandler │ TextHandler │
-├─────────────────────────────────────────────────────────┤
-│                   基础工具层                            │
-│  ConfigUtils  │  HandlerRegistry  │  Models  │  Types  │
-└─────────────────────────────────────────────────────────┘
+BatchDocumentPrinter-WPS\
+├── BatchDocumentPrinter-WPS.exe   主程序（图形界面）
+├── BDP-WPS-Diagnose.exe           WPS COM 诊断工具（控制台，不打印）
+├── _internal\                     运行库、SumatraPDF、图标
+├── data\  logs\                   首次运行后生成（配置 / 日志）
+├── README.md  LICENSE  NOTICE  RELEASE_NOTES.md
+└── licenses\                      第三方许可证（SumatraPDF GPLv3 等）
 ```
 
-## 🚀 核心功能 / 模块详解
+若程序目录不可写，配置和日志会保存到 `%LOCALAPPDATA%\BatchDocumentPrinter-WPS\`。
 
-### 🔧 文档处理器架构 (v5.0 新特性)
+## 使用说明
 
-#### 基础处理器接口 (`base_handler.py`)
-
-定义所有文档处理器必须实现的统一接口：
-
-```python
-class BaseDocumentHandler(ABC):
-    @abstractmethod
-    def get_supported_file_types(self) -> Set[FileType]
-    def get_supported_extensions(self) -> Set[str]
-    def can_handle_file(self, file_path: Path) -> bool
-    def print_document(self, file_path: Path, settings: PrintSettings) -> bool
-    def count_pages(self, file_path: Path) -> int
+```text
+拖入文件/文件夹（或拖到 exe 图标上）
+  → 自动识别类型、加入打印队列
+  → 打印设置：打印机 / 份数 / 纸张 / 单双面 / 方向 / 彩色黑白
+  → 开始打印（批量连续打印）
+  → 列表实时显示 等待 / 正在打印 / 成功 / 失败（失败原因见“备注”列）
+  → 完成后提示“成功 N，失败 M”，并写入打印日志
 ```
 
-#### 处理器注册中心 (`handler_registry.py`)
+- 右键菜单：仅打印选中文档、计算选中文档页数、打开所在文件夹等
+- 打印过程中“开始打印”按钮变为“停止打印”：当前文件完成后停止，其余标记为“已取消”
+- 顶部状态栏显示 Office Backend 与 WPS 各组件状态，点击警告或“环境诊断”查看详情
 
-负责管理和分发各种文档格式的处理器：
+### 打印参数
 
-- 动态处理器注册和发现
-- 基于文件类型和扩展名的智能路由
-- 支持运行时添加新的处理器
-- 统一的错误处理和日志记录
+| 参数 | 选项 | 说明 |
+|------|------|------|
+| 打印机 | 枚举 Windows 已安装打印机 | |
+| 份数 | 1–999 | 由 WPS `PrintOut(Copies=…)` / SumatraPDF `Nx` / GDI 控制 |
+| 纸张 | A3 / A4 / A5 / B5 / Letter / Legal（可“同步电脑纸张”） | |
+| 方向 | 自动 / 纵向 / 横向 | |
+| 单双面 | 单面 / 双面-长边翻转 / 双面-短边翻转 | |
+| 色彩 | 彩色 / 黑白 | |
+| Office 引擎 | 自动（优先 WPS）/ 仅 WPS / 仅 Microsoft Office | |
 
-#### 具体文档处理器
+参数如何生效：
 
-| 处理器 | 支持格式 | 功能 |
-|--------|----------|------|
-| **PDFDocumentHandler** | `.pdf` | PDF打印 + 页数统计 |
-| **WordDocumentHandler** | `.doc`, `.docx`, `.wps` | Word打印 + 页数统计，支持WPS文字 |
-| **PowerPointDocumentHandler** | `.ppt`, `.pptx`, `.dps` | PPT打印 + 幻灯片统计，支持WPS演示 |
-| **ExcelDocumentHandler** | `.xls`, `.xlsx`, `.et` | Excel打印 + 工作表统计，支持WPS表格 |
-| **ImageDocumentHandler** | `.jpg`, `.png`, `.bmp`, `.tiff`, `.webp` | 图片打印 + 页数统计（TIFF多页支持） |
-| **TextDocumentHandler** | `.txt` | 文本打印 + 页数估算，智能编码检测 |
+- **PDF / 图片**：全部参数通过 SumatraPDF `-print-to` + `-print-settings` 传递
+- **文字 / 表格 / 演示**：
+  - 纸张、方向默认**遵循文档自身的页面设置**（表格的 A3 横向表、A4 纵向表会各自正确打印）；
+    勾选“Office 文档也强制使用以上纸张和方向”后，会在打印前临时修改页面设置（不保存原文件）
+  - 单双面、色彩：批次开始时写入该打印机的**每用户默认打印参数**（`PRINTER_INFO_9`，不需要管理员权限，
+    不影响其他用户），批次结束后恢复；WPS 演示另外设置 `PrintOptions.PrintColorType`
+  - 目标打印机：先尝试 `ActivePrinter`，并在批次包含 Office 文档且目标打印机不是默认打印机时，
+    **临时把目标打印机设为 Windows 默认打印机**，结束后恢复（见下文“默认打印机保护”）
+- 打印机驱动不支持的设置（例如黑白打印机选了彩色、不支持双面）不会导致失败，
+  日志与完成提示中会记录：`当前打印机驱动不支持该设置，已使用驱动默认值`
 
-### 🎨 GUI功能处理器架构 (v5.0 新特性)
+### 默认打印机保护
 
-#### 功能处理器详解
+WPS 演示的 `PrintOptions.ActivePrinter` 在部分版本中是只读的，因此需要临时切换系统默认打印机：
 
-#### 1. FileImportHandler (文件导入处理器)
+1. 切换前把“原默认打印机 / 原打印参数”写入 `data\printer_restore_state.json`
+2. 批次结束（成功、失败、取消、异常）时在 `finally` 中恢复，并删除状态文件
+3. 程序被强制结束或崩溃时，下次启动会读取状态文件自动恢复
+4. 同一时间只允许一个批次修改打印机环境（进程内锁 + 状态文件中的进程号）
 
-- **拖拽导入**: 支持多种格式的拖拽数据解析
-- **文件选择**: 文件/文件夹选择对话框
-- **格式过滤**: 根据用户设置过滤文件类型
-- **路径解析**: 智能处理复杂文件路径
+> 批量打印期间请勿手动修改默认打印机；Windows 10/11 的“让 Windows 管理默认打印机”选项也可能在打印后改变默认打印机，
+> 建议关闭（设置 → 蓝牙和其他设备 → 打印机和扫描仪）。
 
-#### 2. ListOperationHandler (列表操作处理器)
+## WPS COM 诊断
 
-- **智能排序**: 列表头点击排序，支持多字段排序
-- **文件操作**: 删除、清空、打开文件位置
-- **右键菜单**: 上下文相关的操作菜单
-- **列表导出**: CSV/文本格式的文档列表导出
+程序通过 COM 注册信息（ProgID → CLSID → LocalServer32）检测 WPS，而不是只看安装目录。
+如果某个组件不可用，状态栏和日志会明确提示，例如：
 
-#### 3. WindowManager (窗口管理器)
+```text
+检测到 WPS Office，但WPS 表格 COM 接口不可用。ProgID: KET.Application
+```
 
-- **几何状态**: 窗口位置和大小的保存/恢复
-- **用户偏好**: 文件类型过滤器等设置持久化
-- **窗口行为**: 居中显示、最小尺寸、关闭处理
-- **配置管理**: 与ConfigManager的集成
+诊断步骤：
 
-### 4. 重构后的打印控制器 (`print_controller.py`)
+1. 主界面点击 **环境诊断 → 深度检测**，或在程序目录运行 `BDP-WPS-Diagnose.exe`，应输出：
+   ```text
+   WPS Writer COM: OK
+   WPS Spreadsheet COM: OK
+   WPS Presentation COM: OK
+   ```
+2. 若提示 ProgID 未注册 / LocalServer32 指向的程序不存在：
+   - 打开 **WPS Office 配置工具**（开始菜单 → WPS Office → 配置工具，或运行 WPS 安装目录下的 `ksomisc.exe`）
+     → **高级** → **兼容设置** → 勾选 **“WPS Office 兼容第三方系统和软件”** → 确定，然后重新检测
+   - 在配置工具中使用“开始修复”，或重新安装 WPS Office
+   - 部分精简版 / 绿色版 WPS 没有注册 COM 组件，需要使用官方完整安装包
+3. 若注册正常但启动失败 / 超时：
+   - 先手动打开一次 WPS，完成首次启动的协议确认、登录提示等弹窗
+   - 确认本程序与 WPS 以相同权限运行（不要一个“以管理员身份运行”另一个不是）
+   - 关闭所有 WPS 窗口后重试（任务管理器中没有 `wps.exe` / `et.exe` / `wpp.exe`）
+4. 开发者也可以运行 `python scripts\test_wps_com.py`（与 `BDP-WPS-Diagnose.exe` 相同）
 
-- **基于处理器架构**: 不再包含具体的格式处理逻辑
-- **智能路由**: 根据文件类型自动选择合适的处理器
-- **统一接口**: 所有文档类型使用相同的打印接口
-- **增强错误处理**: 处理器级别的错误隔离
-- **并行优化**: 支持多个处理器并行工作
+## 日志
 
-### 5. 重构后的页数统计管理器 (`page_count_manager.py`)
+```text
+logs\
+├── app.log                运行日志（滚动 5MB × 5）：环境检测、COM 调用、异常堆栈
+└── print_YYYYMMDD.log     打印任务日志：每个任务一行
+```
 
-- **模块化统计**: 每种格式由专门的处理器负责
-- **并行计算**: 多线程并发处理大批量文档
-- **统一结果格式**: 所有处理器返回标准化的统计结果
-- **缓存机制**: 避免重复计算相同文档的页数
-- **进度追踪**: 大批量统计时提供实时进度更新
+每个任务记录：时间、成功/失败、耗时、文件类型、Backend（例如 `WPS Office (KET.Application)`）、
+打印机、纸张、单双面、方向、份数、色彩、文件路径、错误信息、调用方式备注。
 
-### 6. 核心业务模块
+## 稳定性设计
 
-- **文档管理器** (`document_manager.py`): 支持多种添加方式、文件格式过滤验证、文档列表管理与预览
-- **设置管理器** (`settings_manager.py`): 打印机选择、纸张设置、打印参数配置、用户偏好持久化
-- **配置工具** (`config_utils.py`): 应用程序配置文件操作、用户偏好设置、窗口状态保存
+| 问题 | 处理方式 |
+|------|----------|
+| COM 生命周期 | 每个组件一个 WPS 实例，批次内复用（每 30 个文件回收一次）；批次结束 `Quit`，15 秒未退出则强制结束 |
+| 进程残留 | 通过“创建前后进程快照差集”识别本程序启动的 `wps.exe/et.exe/wpp.exe`，只结束这些进程，不影响用户自己打开的 WPS |
+| 单个文件失败 | 异常只影响当前文件；WPS 崩溃（RPC 服务器不可用）时自动重启该组件，继续下一个文件 |
+| 卡死 | 看门狗超时（文字 3 分钟、表格/演示 5 分钟、PDF/图片按文件大小 2–15 分钟），超时结束 WPS 进程，使阻塞的 COM 调用返回 |
+| 弹窗 | `Visible=False`、`DisplayAlerts` 关闭、宏自动运行禁用；加密文档用“假密码”打开，直接报错而不是弹出密码框 |
+| 文件被 WPS 打开 / 网络共享 / 超长路径 | 复制到短路径临时目录后打印，结束后删除；只读文件以只读方式打开 |
+| 中文路径 / 空格 | 全程使用 Unicode 路径（COM、SumatraPDF 参数列表均不经过 shell） |
+| 线程安全 | 打印在独立工作线程中执行，界面更新通过队列回到主线程；同一时间只允许一个批次 |
 
-## 🔄 架构演进历程
+## Known Issues（已知问题）
 
-### v5.0新特性亮点总结
+- **真实 WPS 环境验证**：v1.0.0 的 WPS COM 调用逻辑已通过 mock 测试和冒烟打包测试，但**尚未在 Windows 10/11 + WPS 的真实环境中完成人工验证**
+  （开发环境没有 Windows/WPS，详见 [验证记录](docs/VERIFICATION.md)）。首次使用建议先用
+  `BDP-WPS-Diagnose.exe` 检查 COM，并用“Microsoft Print to PDF”试打几个文件
+- WPS 文字文档的纸张/方向以文档自身页面设置为准（与 Word 行为一致）；强制套用会导致重新排版
+- 双面、彩色依赖打印机驱动读取“每用户默认打印参数”，个别驱动或 WPS 版本可能忽略，此时使用驱动默认值
+- 若启动批量打印时 WPS 已在运行，WPS 可能复用该实例：程序不会关闭它，但此时超时保护无法强制结束进程，
+  因此开始打印前会提示关闭 WPS
+- 打印较大的临时副本（网络路径 / 被占用文件）时，文档中带路径的域（如 `FILENAME \p`）会显示临时路径
+- “Microsoft Print to PDF”默认会弹出“另存为”对话框；自动化测试请使用 `scripts\setup_test_pdf_printer.ps1` 创建的文件端口打印机
+- 使用未签名的 PyInstaller 可执行文件，个别杀毒软件可能误报
 
-#### 1. **完全模块化的文档处理器架构**
-
-- 支持6种文档格式：PDF、Word、PowerPoint、Excel、图片、文本文件
-- 统一的BaseDocumentHandler接口，确保所有处理器的一致性
-- 智能注册中心HandlerRegistry，支持运行时动态加载处理器
-- **WPS兼容性**：完整支持.wps、.dps、.et格式
-
-#### 2. **GUI架构的彻底重构**
-
-- 实现了界面与业务逻辑的完全分离
-
-#### 3. **增强的扩展性**
-
-- 添加新文档格式只需实现新的处理器类，无需修改现有代码
-- 插件式架构支持第三方扩展
-- 配置驱动的功能开关
-
-#### 4. **更好的错误处理和性能**
-
-- 处理器级别的错误隔离，单个格式的问题不影响其他格式
-- 并行处理能力，支持多文档同时处理
-- 详细的错误信息和建议
-
-#### 5. **新增文件格式支持** 🆕
-
-- **图片文件支持**：.jpg, .jpeg, .png, .bmp, .tiff, .tif, .webp
-- **文本文件支持**：.txt，智能编码检测（UTF-8, GBK, GB2312等）
-- **WPS格式支持**：.wps, .dps, .et，通过复用Office处理器实现
-
-#### 6. **用户体验优化**
-
-- 智能的文件类型识别和过滤
-- 流畅的拖拽导入体验
-- 详细的处理进度显示
-- **提示系统**：仅在文件类型过滤器显示tooltip提示
-
-#### 7. **错误隔离**
-
-- 单个处理器的错误不会影响其他处理器
-- 更好的错误定位和调试能力
-- 提供详细的错误信息和建议
-
-#### 8. **GUI模块化重构优势** 🆕
-
-- **职责分离**: 界面与功能逻辑彻底分离
-- **代码可读性**: 从1357行巨大文件拆分为4个清晰模块
-- **维护便利**: 修改功能无需接触界面代码
-- **测试友好**: 功能处理器可独立进行单元测试
-- **复用性强**: 功能处理器可在其他界面中复用
-
-## 🛠️ 安装与使用
-
-### 环境要求
-
-- **操作系统**: Windows 10/11 (64位)
-- **Python版本**: Python 3.8+ (推荐3.12+)
-- **Office软件**: Microsoft Office 2016+ (用于.docx/.pptx/.xlsx文件处理)
-- **系统权限**: 需要打印机访问权限
-
-### 快速安装
-
-#### 方式一: 直接下载可执行文件 (推荐)
+## 开发
 
 ```bash
-# 1. 下载最新版本
-https://github.com/icescat/batch-document-printer/releases/latest
-
-# 2. 解压并运行
-办公文档批量打印器v5.0.exe
-```
-
-#### 方式二: 从源码安装
-
-```bash
-# 1. 克隆仓库
-git clone https://github.com/icescat/batch-document-printer.git
-cd batch-document-printer
-
-# 2. 创建虚拟环境
-python -m venv .venv
-.venv\Scripts\activate
-
-# 3. 安装依赖
-pip install -r requirements.txt
-
-# 4. 运行程序
-python main.py
-```
-
-#### 方式三: 使用pip安装
-
-```bash
-pip install batch-document-printer
-batch-printer
-```
-
-## 📊 技术实现细节
-
-### 文档处理器实现原理
-
-#### PDF处理器 (`pdf_handler.py`)
-
-```python
-class PDFDocumentHandler(BaseDocumentHandler):
-    def count_pages(self, file_path: Path) -> int:
-        """使用PyPDF2库解析PDF页数"""
-        
-    def print_document(self, file_path: Path, settings: PrintSettings) -> bool:
-        """通过Adobe Reader或Windows默认程序打印"""
-```
-
-#### Word处理器 (`word_handler.py`)
-
-```python
-class WordDocumentHandler(BaseDocumentHandler):
-    def count_pages(self, file_path: Path) -> int:
-        """通过python-docx或COM接口获取页数"""
-        
-    def print_document(self, file_path: Path, settings: PrintSettings) -> bool:
-        """使用Microsoft Word COM接口执行打印"""
-```
-
-#### PowerPoint处理器 (`powerpoint_handler.py`)
-
-```python
-class PowerPointDocumentHandler(BaseDocumentHandler):
-    def count_pages(self, file_path: Path) -> int:
-        """通过python-pptx或COM接口获取幻灯片数"""
-        
-    def print_document(self, file_path: Path, settings: PrintSettings) -> bool:
-        """使用Microsoft PowerPoint COM接口执行打印"""
-```
-
-#### Excel处理器 (`excel_handler.py`)
-
-```python
-class ExcelDocumentHandler(BaseDocumentHandler):
-    def count_pages(self, file_path: Path) -> int:
-        """
-        使用xlwings获取Excel精确打印页数:
-        1. 通过Excel原生API访问HPageBreaks和VPageBreaks
-        2. 计算实际打印页数: (水平分页符+1) × (垂直分页符+1)
-        3. 遍历所有工作表累加总页数
-        4. 确保每个工作表至少统计1页
-        """
-        
-    def print_document(self, file_path: Path, settings: PrintSettings) -> bool:
-        """使用Microsoft Excel COM接口执行打印"""
-```
-
-#### 图片处理器 (`image_handler.py`) 🆕
-
-```python
-class ImageDocumentHandler(BaseDocumentHandler):
-    def count_pages(self, file_path: Path) -> int:
-        """
-        智能图片页数统计:
-        - 一般图片格式(jpg, png, bmp, webp): 1页
-        - TIFF格式: 使用PIL检测实际页数(支持多页TIFF)
-        """
-        
-    def print_document(self, file_path: Path, settings: PrintSettings) -> bool:
-        """通过Windows关联程序或系统打印服务打印图片"""
-```
-
-#### 文本处理器 (`text_handler.py`) 🆕
-
-```python
-class TextDocumentHandler(BaseDocumentHandler):
-    def count_pages(self, file_path: Path) -> int:
-        """
-        智能文本页数估算:
-        1. 多编码检测: UTF-8, GBK, GB2312, ANSI等
-        2. 行数统计: 分析换行符和自动换行
-        3. 页数估算: 基于标准A4纸张尺寸和字体大小
-        4. 文件大小限制: 最大支持100MB文本文件
-        """
-        
-    def print_document(self, file_path: Path, settings: PrintSettings) -> bool:
-        """使用notepad /p命令打印文本文件"""
-```
-
-**Excel页数统计技术细节:**
-
-- **xlwings集成**: 利用xlwings库直接访问Excel的原生分页符API，获得真实的打印页数
-- **分页符分析**: 统计水平分页符(HPageBreaks)和垂直分页符(VPageBreaks)，精确计算页数
-- **工作表遍历**: 逐个处理每个工作表，累加总页数
-- **错误处理**: 单个工作表失败时自动补偿，确保统计结果的可靠性
-
-### 核心算法
-
-#### 1. 智能文件类型识别
-
-```python
-def detect_file_type(file_path: Path) -> FileType:
-    """
-    多层次文件类型识别:
-    1. 文件扩展名检查
-    2. MIME类型检测  
-    3. 文件头魔数验证
-    """
-```
-
-#### 2. 并行处理调度
-
-```python
-class ParallelProcessor:
-    """
-    基于线程池的并行文档处理:
-    - 动态调整工作线程数量
-    - 智能任务分配和负载均衡
-    - 实时进度监控和异常处理
-    """
-```
-
-#### 3. 错误恢复机制
-
-```python
-class ErrorRecoveryManager:
-    """
-    多级错误恢复策略:
-    - 自动重试机制
-    - 降级处理方案
-    - 详细错误日志记录
-    """
-```
-
-## 🧪 开发与测试
-
-### 开发环境搭建
-
-```bash
-# 1. 克隆开发分支
-git clone -b develop https://github.com/icescat/batch-document-printer.git
-
-# 2. 安装开发依赖
 pip install -r requirements-dev.txt
-
-# 3. 安装pre-commit钩子
-pre-commit install
+python -m pytest -q tests              # 单元测试 + mock 端到端测试（不接触真实打印机）
+python scripts/make_samples.py         # 重新生成 tests/samples
+python main.py                         # 运行
+python build_exe.py                    # 测试 + PyInstaller(onedir) + zip + SHA256SUMS（需在 Windows 上）
 ```
 
-### 运行测试
+真实环境验证（Windows + WPS，不消耗纸张）：
 
-```bash
-# 运行所有测试
-pytest
-
-# 运行特定模块测试
-pytest tests/test_handlers/
-
-# 生成测试覆盖率报告
-pytest --cov=src --cov-report=html
+```powershell
+# 管理员 PowerShell：创建文件端口虚拟 PDF 打印机 "BDP Test PDF"
+powershell -ExecutionPolicy Bypass -File scripts\setup_test_pdf_printer.ps1 -OutputFile C:\bdp_test\out.pdf
+python scripts\test_wps_com.py                                   # COM 冒烟测试
+python scripts\e2e_real_print.py --printer "BDP Test PDF" --port-file C:\bdp_test\out.pdf --native
 ```
 
-### 代码质量检查
+`e2e_real_print.py` 会打印全部样例（含一个故意损坏的 docx，以及用 WPS 另存生成的 .wps/.et/.dps），
+检查每个输出 PDF 的页数与方向、WPS 进程是否退出、默认打印机是否恢复，结果写入 `e2e_output/report.json`。
+它拒绝向名称中不含 PDF/XPS 的打印机发送作业，避免误用物理打印机。
 
-```bash
-# 代码格式化
-black src/
+GitHub Actions：`ci.yml`（Windows/Linux 单元测试 + Windows 打包）、`release.yml`（打 tag 自动构建并发布）、
+`wps-e2e.yml`（手动触发：在 Windows runner 上安装 WPS 并运行真实 COM/打印测试，仅供参考）。
 
-# 静态类型检查  
-mypy src/
+### 项目结构
 
-# 代码风格检查
-flake8 src/
+```text
+main.py                         入口：日志、崩溃后恢复默认打印机、清理临时文件
+src/version.py                  产品名称与版本
+src/backends/                   Office Backend 层（WPS 优先）
+  office_backend.py             OfficeKind / OfficeBackend / OfficeSession / 会话池 / 看门狗 / detect_backend()
+  wps_backend.py                KWPS / KET / KWPP
+  ms_office_backend.py          Word / Excel / PowerPoint（可选回退）
+  office_ops.py                 打开/打印/页数/关闭（多级降级调用兼容 WPS）
+  com_utils.py  process_utils.py
+src/core/
+  print_controller.py           批量打印队列、超时、日志
+  printer_environment.py        默认打印机切换与恢复、每用户打印参数、崩溃恢复
+  environment.py                启动环境检测
+  file_prep.py                  占用/网络/长路径文件的临时副本
+src/handlers/                   各格式处理器（文字/表格/演示/PDF/图片/文本）
+src/gui/                        tkinter 界面（延续原项目风格）
+scripts/                        COM 冒烟测试、真实打印 E2E、样例生成、测试打印机
+tests/                          pytest（全部 mock）
 ```
 
-## 📦 构建与分发
+## 致谢与许可
 
-### 构建可执行文件
+- 原项目：[batch-document-printer](https://github.com/icescat/batch-document-printer)，作者 **喵言喵语 (icescat)**，MIT 许可
+- WPS COM 调用方式参考：[harness-anything](https://github.com/yb2460/harness-anything) 的 WPS Backend（MIT 许可，未包含其框架代码）
+- PDF/图片打印：[SumatraPDF](https://github.com/sumatrapdfreader/sumatrapdf) 3.4.6（GPLv3，作为独立程序随附，许可证见 `licenses/`）
+- 本项目采用 MIT 许可证，详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)
 
-```bash
-# 使用提供的构建脚本
-.\build_v5.0.bat
-
-# 或手动使用PyInstaller
-pyinstaller 办公文档批量打印器v5.0.spec
-```
-
-### 项目打包
-
-```bash
-# 创建分发包
-python setup.py sdist bdist_wheel
-
-# 上传到PyPI
-twine upload dist/*
-```
-
-## 📄 许可证
-
-本项目采用 [MIT许可证](LICENSE) - 查看LICENSE文件了解详情。
-
-## 📞 支持与反馈
-
-- **GitHub**: [项目仓库](https://github.com/icescat/batch-document-printer)
-- **Issues**: [问题追踪](https://github.com/icescat/batch-document-printer/issues)
-- **文档**: [在线文档](https://github.com/icescat/batch-document-printer/wiki)
-
-## 📅 版本更新历史
-
-### 🚀 v5.0 (2025-06-25) - 架构重构版本
-
-#### 新增功能
-- ✅ **多格式支持扩展**: 新增图片文件(.jpg, .jpeg, .png, .bmp, .tiff, .tif, .webp)和文本文件(.txt)支持
-- ✅ **WPS兼容性**: 完整支持WPS格式(.wps, .dps, .et)，复用Office处理器
-- ✅ **智能提示系统**: 优化的tooltip提示，仅在必要位置显示帮助信息
-- ✅ **增强编码支持**: 文本文件智能编码检测(UTF-8, GBK, GB2312等)
-
-#### 架构重构
-- 🔧 **策略模式+注册器**: 全新的模块化处理器架构，每种文件格式独立处理器
-- 🔧 **GUI组件分离**: GUI功能模块化，提升代码可维护性
-- 🔧 **并发优化**: 改进的多线程页数统计，提升处理效率
-
-#### 技术升级
-- 📈 支持Python 3.12+，向下兼容3.8+
-- 📈 改进内存管理，减少大文件处理时的内存占用
-- 📈 更快的启动速度和更稳定的COM接口调用
-
----
-
-### 🔄 v4.1 (2025-06-23) - 拖拽修复版本
-
-#### 问题修复
-- 🐛 **拖拽导入修复**: 解决文件名包含空格时的导入失败问题
-- 🐛 **路径解析优化**: 改进含特殊字符路径的处理逻辑
-
----
-
-### 📁 v4.0 (2025-06-23) - 拖拽导入版本
-
-#### 新增功能  
-- ✅ **拖拽导入功能**: 支持直接拖拽文件和文件夹到程序窗口
-- ✅ **递归文件夹扫描**: 自动搜索子文件夹中的支持文档
-- ✅ **智能路径解析**: 自动处理文件路径格式和特殊字符
-
-#### 用户体验改进
-- 🎨 更直观的文件添加方式
-- 🎨 实时的文件类型过滤器应用
-- 🎨 改进的操作反馈提示
-
----
-
-### 📊 v3.0 (2025-06-22) - 页数统计版本
-
-#### 重大功能新增
-- ✅ **页数统计功能**: 全新的文档页数/张数统计功能
-- ✅ **统计结果展示**: 专用的页数统计对话框，提供详细结果
-- ✅ **批量统计**: 支持多文档同时统计，大幅提升效率
-- ✅ **成本预估**: 为用户提供打印页数参考，便于成本评估
-
-#### 技术实现
-- 🔧 优化数据模型，增加页数相关字段
-- 🔧 完善界面交互，增强用户体验
-
----
-
-### 📋 v2.0 (2025-06-22) - Excel支持版本
-
-#### 核心功能扩展
-- ✅ **Excel文件支持**: 新增.xls和.xlsx格式支持
-- ✅ **文件类型过滤器**: 独立的Word、PPT、Excel、PDF过滤开关
-- ✅ **界面优化**: 重新设计过滤器布局，提升使用便利性
-
-#### 功能改进
-- 🎨 文件类型可视化选择
-- 🎨 改进的文件添加逻辑
-- 🎨 优化的界面布局和交互
-
----
-
-### 🎯 v1.0 (2025-06-22) - 首发版本
-
-#### 基础功能实现
-- ✅ **核心打印功能**: 支持Word(.doc/.docx)、PowerPoint(.ppt/.pptx)、PDF文件的批量打印
-- ✅ **图形化界面**: 基于tkinter的直观用户界面
-- ✅ **打印设置**: 完整的打印参数配置(打印机、纸张、份数等)
-- ✅ **文档管理**: 支持添加、删除、清空文档列表
-
-#### 技术基础
-- 🔧 基于Python + tkinter的跨平台桌面应用
-- 🔧 COM接口调用Microsoft Office组件
-- 🔧 PyPDF2处理PDF文档
-- 🔧 模块化的代码架构设计
-
----
-⭐ 如果这个项目对您有帮助，请给个Star支持一下！ | 💬 欢迎提出建议和反馈
+WPS Office 是金山办公的商标，Microsoft Office 是微软公司的商标，本项目与二者无关联。

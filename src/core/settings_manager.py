@@ -3,7 +3,7 @@
 负责检测打印机、管理打印设置配置
 """
 import win32print
-import win32api
+
 from typing import List, Dict, Optional, Tuple
 from .models import PrintSettings, ColorMode, Orientation
 
@@ -53,9 +53,11 @@ class PrinterSettingsManager:
     # 标准纸张尺寸映射表（作为备用）
     STANDARD_PAPER_SIZES = {
         'A4': (210, 297),
-        'A3': (297, 420), 
+        'A3': (297, 420),
         'A5': (148, 210),
-        'B5': (176, 250)
+        'B5': (176, 250),
+        'Letter': (216, 279),
+        'Legal': (216, 356),
     }
     
     # 常见纸张尺寸代码映射（DMPAPER_* 常量）
@@ -195,7 +197,7 @@ class PrinterSettingsManager:
             # 获取默认打印机
             try:
                 self._default_printer = win32print.GetDefaultPrinter()
-            except:
+            except Exception:  # 没有默认打印机时 GetDefaultPrinter 会抛异常
                 self._default_printer = self._available_printers[0] if self._available_printers else None
                 
             # 清空纸张尺寸缓存，强制重新读取
@@ -253,14 +255,11 @@ class PrinterSettingsManager:
             if not self.validate_printer(printer_name):
                 return None
                 
-            # 打开打印机
             handle = win32print.OpenPrinter(printer_name)
-            
-            # 获取打印机信息
-            printer_info = win32print.GetPrinter(handle, 2)
-            
-            # 关闭打印机句柄
-            win32print.ClosePrinter(handle)
+            try:
+                printer_info = win32print.GetPrinter(handle, 2)
+            finally:
+                win32print.ClosePrinter(handle)
             
             return {
                 'name': printer_info['pPrinterName'],
@@ -305,9 +304,9 @@ class PrinterSettingsManager:
             printer_name=printer_name,
             paper_size="A4",
             copies=1,
-            duplex=False,  # 默认关闭双面打印
+            duplex=False,  # 默认单面
             color_mode=ColorMode.GRAYSCALE,  # 黑白打印
-            orientation=Orientation.PORTRAIT  # 竖向（纵向）
+            orientation=Orientation.AUTO  # 自动（跟随文档）
         )
     
     def validate_settings(self, settings: PrintSettings) -> tuple[bool, List[str]]:
@@ -328,13 +327,10 @@ class PrinterSettingsManager:
         elif not self.validate_printer(settings.printer_name):
             errors.append(f"打印机不可用: {settings.printer_name}")
         
-        # 验证纸张尺寸（针对具体打印机）
-        if settings.printer_name:
-            supported_papers = self.get_printer_paper_sizes(settings.printer_name)
-            if settings.paper_size not in supported_papers:
-                errors.append(f"打印机 {settings.printer_name} 不支持纸张尺寸: {settings.paper_size}")
-        elif settings.paper_size not in self.STANDARD_PAPER_SIZES:
-            errors.append(f"不支持的纸张尺寸: {settings.paper_size}")
+        # 纸张尺寸：驱动返回的纸张名称可能与标准名称不同（例如 "A4 210 x 297 mm"），
+        # 不再因此阻止保存；不支持的纸张会在打印时记录"已使用驱动默认值"
+        if not settings.paper_size:
+            errors.append("未选择纸张尺寸")
         
         # 验证打印数量
         if settings.copies < 1 or settings.copies > 999:

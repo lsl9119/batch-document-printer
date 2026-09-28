@@ -3,9 +3,19 @@
 负责应用配置的保存和加载
 """
 import json
+import os
 from pathlib import Path
 from typing import Optional
 from src.core.models import AppConfig, PrintSettings
+from src.utils.path_utils import get_config_dir
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """先写临时文件再替换，避免写入过程中断导致配置损坏"""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
 
 
 class ConfigManager:
@@ -19,8 +29,9 @@ class ConfigManager:
             config_dir: 配置文件目录，默认为data目录
         """
         if config_dir is None:
-            # 默认使用项目根目录下的data文件夹
-            self.config_dir = Path(__file__).parent.parent.parent / "data"
+            # 可写的用户数据目录（便携模式为程序目录\data，否则 %LOCALAPPDATA%）
+            # v5.x 使用源码目录，打包成单文件 exe 后配置会丢失
+            self.config_dir = get_config_dir()
         else:
             self.config_dir = config_dir
         
@@ -62,8 +73,7 @@ class ConfigManager:
             是否保存成功
         """
         try:
-            with open(self.app_config_file, 'w', encoding='utf-8') as f:
-                json.dump(config.to_dict(), f, indent=2, ensure_ascii=False)
+            _atomic_write_json(self.app_config_file, config.to_dict())
             print(f"应用配置已保存到: {self.app_config_file}")
             return True
             
@@ -102,8 +112,7 @@ class ConfigManager:
             是否保存成功
         """
         try:
-            with open(self.print_settings_file, 'w', encoding='utf-8') as f:
-                json.dump(settings.to_dict(), f, indent=2, ensure_ascii=False)
+            _atomic_write_json(self.print_settings_file, settings.to_dict())
             print(f"打印设置已保存到: {self.print_settings_file}")
             return True
             

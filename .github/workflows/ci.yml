@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  unit-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      # 全部为 mock 测试：不接触真实打印机、不需要 WPS
+      - run: python -m pytest -q tests
+
+  build-windows:
+    needs: unit-tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      - run: python build_exe.py --skip-tests
+      - name: Smoke test frozen diagnostic tool (no WPS on runner -> expected exit 1, must not crash)
+        shell: pwsh
+        run: |
+          & dist\BatchDocumentPrinter-WPS\BDP-WPS-Diagnose.exe --timeout 30
+          if ($LASTEXITCODE -gt 1) { throw "diagnose crashed with $LASTEXITCODE" }
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BatchDocumentPrinter-WPS
+          path: |
+            dist/BatchDocumentPrinter-WPS-v*.zip
+            dist/SHA256SUMS.txt

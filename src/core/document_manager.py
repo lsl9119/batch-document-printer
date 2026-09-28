@@ -5,21 +5,14 @@
 import os
 from pathlib import Path
 from typing import List, Optional, Set, Dict, Callable
-from .models import Document, FileType, PrintStatus
+from .models import Document, FileType, PrintStatus, EXTENSION_TYPE_MAP, extensions_for_types
 
 
 class DocumentManager:
     """文档管理器类"""
     
-    # 支持的文件扩展名
-    SUPPORTED_EXTENSIONS = {
-        '.doc', '.docx', '.wps',    # Word文档（包含WPS文字）
-        '.ppt', '.pptx', '.dps',    # PowerPoint（包含WPS演示）
-        '.xls', '.xlsx', '.et',     # Excel表格（包含WPS表格）
-        '.pdf',                     # PDF文件
-        '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp',  # 图片文件（已移除.gif, .ico和.pcx）
-        '.txt'                      # 文本文件
-    }
+    # 支持的文件扩展名（来自 models.EXTENSION_TYPE_MAP）
+    SUPPORTED_EXTENSIONS = set(EXTENSION_TYPE_MAP)
     
     def __init__(self):
         """初始化文档管理器"""
@@ -117,28 +110,13 @@ class DocumentManager:
             print(f"无效的文件夹路径: {folder_path}")
             return []
         
-        # 如果没有提供文件类型过滤器，默认启用所有类型
-        if enabled_file_types is None:
-            enabled_file_types = {'word': True, 'ppt': True, 'excel': True, 'pdf': True, 'image': True, 'text': True}
-        
-        # 根据启用的文件类型构建允许的扩展名集合
-        allowed_extensions = set()
-        if enabled_file_types.get('word', False):
-            allowed_extensions.update(['.doc', '.docx', '.wps'])
-        if enabled_file_types.get('ppt', False):
-            allowed_extensions.update(['.ppt', '.pptx', '.dps'])
-        if enabled_file_types.get('excel', False):
-            allowed_extensions.update(['.xls', '.xlsx', '.et'])
-        if enabled_file_types.get('pdf', False):
-            allowed_extensions.add('.pdf')
-        if enabled_file_types.get('image', False):
-            allowed_extensions.update(['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'])
-        if enabled_file_types.get('text', False):
-            allowed_extensions.add('.txt')
+        # 根据启用的文件类型构建允许的扩展名集合（None 表示全部类型）
+        allowed_extensions = extensions_for_types(enabled_file_types)
         
         # 获取文件列表
         pattern = "**/*" if recursive else "*"
-        all_files = list(folder_path.glob(pattern))
+        # 按路径排序，保证打印顺序与资源管理器中的顺序一致、可预期
+        all_files = sorted(folder_path.glob(pattern), key=lambda p: str(p).lower())
         
         # 过滤支持的文件（根据启用的文件类型）
         supported_files = [
@@ -417,7 +395,7 @@ class DocumentManager:
         
         # 3. 检查Windows系统临时文件
         temp_patterns = [
-            '~',          # 以~开头的文件
+            '~WRL',       # Word 保存过程中的临时文件
             'Thumbs.db',  # Windows缩略图文件
             'desktop.ini', # Windows桌面配置文件
             '.DS_Store',  # macOS系统文件
@@ -438,15 +416,11 @@ class DocumentManager:
                 return True
         
         # 5. 检查备份文件
-        backup_patterns = [
-            '.bak',    # 备份文件
-            '.backup', # 备份文件
-            '副本',    # 中文副本文件
-            ' - 副本', # 中文副本文件
-        ]
+        # 注意：v5.x 会跳过文件名含"副本"的文件，但"xxx - 副本.docx"是用户正常文档，WPS 版不再跳过
+        backup_patterns = ['.bak', '.backup']
         
         for pattern in backup_patterns:
-            if file_name.lower().endswith(pattern.lower()) or pattern in file_name:
+            if file_name.lower().endswith(pattern):
                 return True
         
         # 6. 使用Windows API检查隐藏属性（如果可用）

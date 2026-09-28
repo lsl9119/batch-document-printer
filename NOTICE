@@ -1,0 +1,65 @@
+Batch Document Printer - WPS Edition
+Copyright (c) 2026 Batch Document Printer - WPS Edition contributors
+Licensed under the MIT License (see LICENSE).
+
+===============================================================================
+1. Upstream project (derived work)
+===============================================================================
+This project is a derivative of "batch-document-printer" (办公文档批量打印器):
+    https://github.com/icescat/batch-document-printer
+    Author: 喵言喵语 (icescat), Copyright (c) 2024
+    License: MIT (declared in the upstream README; the upstream repository does
+             not ship a LICENSE file, so the standard MIT text is reproduced in
+             our LICENSE together with the original copyright line).
+The GUI, document list, handler/registry architecture, page counting and the
+SumatraPDF integration originate from the upstream project. The original
+author information is retained in LICENSE, NOTICE, README and the About dialog.
+
+===============================================================================
+2. Reference implementation for WPS COM automation
+===============================================================================
+The WPS COM ProgIDs and calling conventions (KWPS.Application,
+KET.Application, KWPP.Application; pythoncom.CoInitialize + Dispatch;
+Documents/Workbooks/Presentations.Open; Quit handling) were studied from:
+    harness-anything - cli_anything/wps/utils/wps_backend.py
+    https://github.com/yb2460/harness-anything
+    Copyright (c) 2026 cli-anything-wps contributors
+    License: MIT (full text: licenses/harness-anything-LICENSE.txt)
+No harness-anything framework code is included; the backend layer in
+src/backends/ is an independent implementation informed by that reference.
+
+===============================================================================
+3. Bundled third-party program
+===============================================================================
+SumatraPDF 3.4.6 (external/SumatraPDF/SumatraPDF.exe, unmodified binary)
+    Copyright (c) Krzysztof Kowalczyk and SumatraPDF contributors
+    License: GNU General Public License v3 (licenses/SumatraPDF-COPYING.txt);
+             parts under BSD (licenses/SumatraPDF-COPYING.BSD.txt)
+    Source code: https://github.com/sumatrapdfreader/sumatrapdf/tree/3.4.6rel
+    SumatraPDF is invoked as a separate program via its command line
+    (-print-to / -print-settings); it is not linked into this software.
+
+===============================================================================
+4. Python runtime and libraries included in the Windows build
+===============================================================================
+Python 3.11            PSF License                https://www.python.org/
+Tcl/Tk (tkinter)       Tcl/Tk License (BSD-style) https://www.tcl.tk/
+pywin32                PSF License                https://github.com/mhammond/pywin32
+psutil                 BSD-3-Clause               https://github.com/giampaolo/psutil
+Pillow                 MIT-CMU (HPND)             https://github.com/python-pillow/Pillow
+PyPDF2                 BSD-3-Clause               https://github.com/py-pdf/pypdf
+python-pptx            MIT                        https://github.com/scanny/python-pptx
+openpyxl               MIT                        https://foss.heptapod.net/openpyxl/openpyxl
+lxml (via python-pptx) BSD-3-Clause               https://lxml.de/
+XlsxWriter (via python-pptx) BSD-2-Clause         https://github.com/jmcnamara/XlsxWriter
+tkinterdnd2 / tkdnd    MIT / BSD-style            https://github.com/pmgagne/tkinterdnd2
+PyInstaller bootloader GPL-2.0 with bootloader exception (allows distribution
+                       of the frozen application under any license)
+                                                  https://pyinstaller.org/
+
+===============================================================================
+5. Trademarks
+===============================================================================
+WPS Office is a trademark of Kingsoft Office Software. Microsoft Office, Word,
+Excel, PowerPoint and Windows are trademarks of Microsoft Corporation. This
+project is not affiliated with or endorsed by either company.

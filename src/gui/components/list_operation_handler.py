@@ -134,41 +134,20 @@ class ListOperationHandler:
         return selected_documents
     
     def get_selected_document_objects(self) -> List:
-        """获取选中的文档对象"""
-        selected_info = self.get_selected_documents()
-        selected_file_names = [info['file_name'] for info in selected_info]
-        
-        # 从文档管理器中找到对应的文档对象
-        selected_documents = []
-        for doc in self.document_manager.documents:
-            if doc.file_name in selected_file_names:
-                selected_documents.append(doc)
-        
-        return selected_documents
+        """获取选中的文档对象（树形控件的行 iid 即文档 id，同名文件不会混淆）"""
+        selected_ids = set(self.tree_widget.selection())
+        return [doc for doc in self.document_manager.documents if doc.id in selected_ids]
     
     def remove_selected_documents(self) -> int:
         """删除选中的文档"""
-        selected_docs = self.get_selected_documents()
-        if not selected_docs:
+        selected_ids = list(self.tree_widget.selection())
+        if not selected_ids:
             messagebox.showinfo("提示", "请先选择要删除的文档")
             return 0
         
-        if messagebox.askyesno("确认", f"确定要删除选中的 {len(selected_docs)} 个文档吗？"):
-            # 根据文件名删除文档
-            removed_count = 0
-            for doc_info in selected_docs:
-                file_name = doc_info['file_name']
-                # 从文档管理器中找到并移除对应文档
-                for doc in self.document_manager.documents:
-                    if doc.file_name == file_name:
-                        if self.document_manager.remove_document(doc.id):
-                            removed_count += 1
-                        break
-            
-            if removed_count > 0:
-                # 去掉删除完成提示窗口
-                print(f"已删除 {removed_count} 个文档")
-            
+        if messagebox.askyesno("确认", f"确定要删除选中的 {len(selected_ids)} 个文档吗？"):
+            removed_count = sum(1 for doc_id in selected_ids if self.document_manager.remove_document(doc_id))
+            print(f"已删除 {removed_count} 个文档")
             return removed_count
         
         return 0
@@ -187,12 +166,12 @@ class ListOperationHandler:
             
         try:
             path = Path(file_path)
-            # 在Windows文件管理器中打开并选中文件
-            result = subprocess.run(['explorer', '/select,', str(path)], 
-                                  capture_output=True, text=True)
-            # 只有在真正失败时才显示错误（例如文件不存在）
-            if result.returncode != 0 and not path.exists():
+            if not path.exists():
                 messagebox.showerror("错误", f"文件不存在: {path}")
+                return
+            # 在资源管理器中打开并选中文件（不等待、不捕获输出，避免阻塞界面线程）
+            subprocess.Popen(['explorer', '/select,', str(path)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
             messagebox.showerror("错误", f"无法打开文件夹: {e}")
     
@@ -359,8 +338,7 @@ class ListOperationHandler:
         documents_to_remove = []
         for doc in self.document_manager.documents:
             # 根据文档的文件类型判断是否需要移除
-            doc_type = self._get_document_type_key(doc.type_display)
-            if doc_type not in enabled_types:
+            if doc.file_type.value not in enabled_types:
                 documents_to_remove.append(doc)
         
         if not documents_to_remove:
@@ -385,26 +363,6 @@ class ListOperationHandler:
         
         return removed_count
     
-    def _get_document_type_key(self, type_display: str) -> str:
-        """
-        根据文档显示类型获取对应的类型键
-        
-        Args:
-            type_display: 文档显示类型，如 "Word文档"、"PDF文件" 等
-            
-        Returns:
-            str: 对应的类型键，如 "word"、"pdf" 等
-        """
-        type_mapping = {
-            "Word文档": "word",
-            "PowerPoint": "ppt", 
-            "Excel表格": "excel",
-            "PDF文件": "pdf",
-            "图片文件": "image",
-            "文本文件": "text"
-        }
-        return type_mapping.get(type_display, "unknown")
-    
     def _get_type_display_name(self, type_key: str) -> str:
         """
         根据类型键获取显示名称
@@ -416,9 +374,9 @@ class ListOperationHandler:
             str: 显示名称
         """
         display_mapping = {
-            "word": "Word",
-            "ppt": "PPT", 
-            "excel": "Excel",
+            "word": "文字",
+            "ppt": "演示",
+            "excel": "表格",
             "pdf": "PDF",
             "image": "图片",
             "text": "文本"

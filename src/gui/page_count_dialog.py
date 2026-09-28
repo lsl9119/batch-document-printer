@@ -9,6 +9,7 @@ from typing import List
 import csv
 import json
 from datetime import datetime
+import queue
 import threading
 
 from src.core.page_count_manager import PageCountManager, PageCountSummary, PageCountResult, PageCountStatus
@@ -22,7 +23,7 @@ class PageCountProgressDialog:
         """初始化进度对话框"""
         self.parent = parent
         self.dialog = tk.Toplevel(parent)
-        self.dialog.title("页数计算中，遇到密码保护文档必须手动关掉打开的文档")
+        self.dialog.title("页数计算中（加密文档会自动跳过）")
         self.dialog.geometry("400x180")
         self.dialog.resizable(False, False)
         self.dialog.transient(parent)
@@ -86,7 +87,6 @@ class PageCountProgressDialog:
             self.progress_bar['value'] = progress
             self.progress_label.config(text=f"{current}/{total}")
             self.status_label.config(text=message)
-            self.dialog.update()
     
     def _on_cancel(self):
         """取消计算"""
@@ -637,44 +637,53 @@ def show_page_count_dialog(parent, documents: List[Document]):
     
     # 创建进度对话框
     progress_dialog = PageCountProgressDialog(parent)
-    
-    # 创建页数管理器
+
+    # 后台线程只向队列投递消息，界面更新在主线程中完成（Tkinter 非线程安全）
+    events: "queue.Queue" = queue.Queue()
     page_manager = PageCountManager()
-    page_manager.set_progress_callback(progress_dialog.update_progress)
-    
-    summary = None
-    error_message = None
-    
+    page_manager.set_progress_callback(lambda cur, total, msg: events.put(("progress", (cur, total, msg))))
+    outcome = {"summary": None, "error": None}
+
     def calculate_in_background():
-        """在后台线程中计算页数"""
-        nonlocal summary, error_message
         try:
-            summary = page_manager.calculate_all_pages(documents)
-        except Exception as e:
-            error_message = str(e)
-        finally:
-            # 关闭进度对话框
-            if not progress_dialog.cancelled:
-                progress_dialog.close()
-    
-    # 启动后台计算
-    thread = threading.Thread(target=calculate_in_background, daemon=True)
+            events.put(("done", page_manager.calculate_all_pages(documents)))
+        except Exception as e:  # noqa: BLE001 - 错误展示给用户
+            events.put(("error", str(e)))
+
+    def poll():
+        try:
+            while True:
+                kind, payload = events.get_nowait()
+                if kind == "progress":
+                    progress_dialog.update_progress(*payload)
+                elif kind == "done":
+                    outcome["summary"] = payload
+                    progress_dialog.close()
+                    return
+                elif kind == "error":
+                    outcome["error"] = payload
+                    progress_dialog.close()
+                    return
+        except queue.Empty:
+            pass
+        if progress_dialog.dialog.winfo_exists():
+            parent.after(100, poll)
+
+    # 非守护线程：即使用户关闭程序，也会等待 WPS 进程被正确退出
+    thread = threading.Thread(target=calculate_in_background, name="PageCount", daemon=False)
     thread.start()
-    
+    parent.after(100, poll)
+
     # 等待计算完成或用户取消
     parent.wait_window(progress_dialog.dialog)
-    
+
     if progress_dialog.cancelled:
         page_manager.cancel_calculation()
         return
-    
-    # 等待线程完成
-    thread.join(timeout=1.0)
-    
-    if error_message:
-        messagebox.showerror("错误", f"页数计算失败: {error_message}")
+
+    if outcome["error"]:
+        messagebox.showerror("错误", f"页数计算失败: {outcome['error']}")
         return
-    
-    if summary:
-        # 显示结果对话框
-        PageCountResultDialog(parent, summary) 
+
+    if outcome["summary"]:
+        PageCountResultDialog(parent, outcome["summary"])
