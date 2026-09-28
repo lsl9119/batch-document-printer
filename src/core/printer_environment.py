@@ -304,7 +304,45 @@ class DevModeGuard:
         return restore_devmode(self.printer_name, bool(self.had_user_devmode), self.original, self._log)
 
 
+def clear_user_devmode_native(printer_name: str) -> bool:
+    """
+    删除每用户默认 DEVMODE（SetPrinter level 9, pDevMode=NULL），恢复为跟随打印机全局设置。
+    pywin32 的 SetPrinter 不接受 pDevMode=None，因此直接调用 winspool.drv。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class PRINTER_DEFAULTSW(ctypes.Structure):
+        _fields_ = [("pDatatype", wintypes.LPWSTR), ("pDevMode", ctypes.c_void_p),
+                    ("DesiredAccess", wintypes.DWORD)]
+
+    class PRINTER_INFO_9W(ctypes.Structure):
+        _fields_ = [("pDevMode", ctypes.c_void_p)]
+
+    winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+    winspool.OpenPrinterW.argtypes = [wintypes.LPWSTR, ctypes.POINTER(wintypes.HANDLE),
+                                      ctypes.POINTER(PRINTER_DEFAULTSW)]
+    winspool.SetPrinterW.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    winspool.ClosePrinter.argtypes = [wintypes.HANDLE]
+    handle = wintypes.HANDLE()
+    defaults = PRINTER_DEFAULTSW(None, None, PRINTER_ACCESS_USE)
+    if not winspool.OpenPrinterW(printer_name, ctypes.byref(handle), ctypes.byref(defaults)):
+        return False
+    try:
+        info = PRINTER_INFO_9W(None)
+        return bool(winspool.SetPrinterW(handle, 9, ctypes.byref(info), 0))
+    finally:
+        winspool.ClosePrinter(handle)
+
+
 def restore_devmode(printer_name: str, had_user_devmode: bool, original: Dict[str, int], log: LogFunc) -> bool:
+    if not had_user_devmode:
+        try:
+            if clear_user_devmode_native(printer_name):
+                log(f"已清除临时写入的每用户打印参数: {printer_name}")
+                return True
+        except (OSError, AttributeError, ValueError) as e:  # 非 Windows / 旧系统：回退为逐字段恢复
+            log(f"清除每用户打印参数失败，改为逐字段恢复: {e}")
     wp = _win32print()
     try:
         handle = wp.OpenPrinter(printer_name, {"DesiredAccess": PRINTER_ACCESS_USE})
@@ -312,13 +350,6 @@ def restore_devmode(printer_name: str, had_user_devmode: bool, original: Dict[st
         log(f"恢复打印参数失败，无法打开打印机 {printer_name}: {e}")
         return False
     try:
-        if not had_user_devmode:
-            try:
-                wp.SetPrinter(handle, 9, {"pDevMode": None}, 0)
-                log(f"已清除临时写入的每用户打印参数: {printer_name}")
-                return True
-            except Exception as e:  # noqa: BLE001 - 回退为逐字段恢复
-                log(f"清除每用户打印参数失败，改为逐字段恢复: {e}")
         devmode = None
         try:
             devmode = wp.GetPrinter(handle, 9).get("pDevMode")

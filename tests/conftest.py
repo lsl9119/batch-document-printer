@@ -31,6 +31,12 @@ def fake_win32print(monkeypatch):
                                        papers=(9,), paper_names=("A4",))],
                           default="Office Printer")
     monkeypatch.setattr(printer_environment, "_win32print", lambda: fake)
+
+    def clear_native(name):
+        fake.printers[name].user_devmode = None
+        return True
+
+    monkeypatch.setattr(printer_environment, "clear_user_devmode_native", clear_native)
     monkeypatch.setattr(printer_environment.time, "sleep", lambda s: None)
     return fake
 
