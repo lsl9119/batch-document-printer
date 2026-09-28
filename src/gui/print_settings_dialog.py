@@ -7,7 +7,14 @@ from tkinter import ttk, messagebox
 from typing import Optional
 
 from src.core.settings_manager import PrinterSettingsManager
-from src.core.models import PrintSettings, ColorMode, Orientation
+from src.core.models import (PrintSettings, ColorMode, Orientation, DuplexMode,
+                             OfficeBackendPreference)
+
+BACKEND_CHOICES = [
+    ("自动（优先 WPS Office）", OfficeBackendPreference.AUTO),
+    ("仅 WPS Office", OfficeBackendPreference.WPS),
+    ("仅 Microsoft Office", OfficeBackendPreference.MS_OFFICE),
+]
 
 
 class PrintSettingsDialog:
@@ -30,8 +37,8 @@ class PrintSettingsDialog:
         # 创建对话框窗口
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("打印设置")
-        self.dialog.geometry("550x450")
-        self.dialog.resizable(False, False)
+        self.dialog.geometry("600x600")
+        self.dialog.resizable(True, True)
         self.dialog.transient(parent)
         self.dialog.grab_set()
         
@@ -160,21 +167,17 @@ class PrintSettingsDialog:
         orientation_frame = ttk.Frame(paper_frame)
         orientation_frame.grid(row=1, column=1, sticky="w", pady=(10, 0))
         
-        self.rb_portrait = ttk.Radiobutton(
-            orientation_frame,
-            text="纵向",
-            variable=self.orientation_var,
-            value="portrait"
-        )
-        self.rb_portrait.pack(side="left", padx=(0, 10))
-        
-        self.rb_landscape = ttk.Radiobutton(
-            orientation_frame,
-            text="横向",
-            variable=self.orientation_var,
-            value="landscape"
-        )
-        self.rb_landscape.pack(side="left")
+        for text, value in (("自动", "auto"), ("纵向", "portrait"), ("横向", "landscape")):
+            ttk.Radiobutton(orientation_frame, text=text, variable=self.orientation_var,
+                            value=value).pack(side="left", padx=(0, 10))
+
+        # Office 文档是否强制套用纸张/方向
+        self.force_page_setup_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            paper_frame,
+            text="Office 文档（文字/表格）也强制使用以上纸张和方向（默认遵循文档自身的页面设置）",
+            variable=self.force_page_setup_var
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
         
         # 配置网格权重
         paper_frame.grid_columnconfigure(1, weight=1)
@@ -221,14 +224,26 @@ class PrintSettingsDialog:
         )
         self.rb_grayscale.pack(side="left")
         
-        # 双面打印
-        self.duplex_var = tk.BooleanVar()
-        self.cb_duplex = ttk.Checkbutton(
-            options_frame,
-            text="双面打印",
-            variable=self.duplex_var
-        )
-        self.cb_duplex.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        # 单双面
+        ttk.Label(options_frame, text="单双面:").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=(10, 0))
+        self.duplex_var = tk.StringVar()
+        duplex_frame = ttk.Frame(options_frame)
+        duplex_frame.grid(row=2, column=1, sticky="w", pady=(10, 0))
+        for text, value in (("单面", DuplexMode.SIMPLEX.value), ("双面-长边翻转", DuplexMode.DUPLEX_LONG.value),
+                            ("双面-短边翻转", DuplexMode.DUPLEX_SHORT.value)):
+            ttk.Radiobutton(duplex_frame, text=text, variable=self.duplex_var,
+                            value=value).pack(side="left", padx=(0, 10))
+
+        # Office 引擎
+        ttk.Label(options_frame, text="Office 引擎:").grid(row=3, column=0, sticky="w", padx=(0, 10), pady=(10, 0))
+        self.backend_var = tk.StringVar()
+        self.backend_combo = ttk.Combobox(options_frame, textvariable=self.backend_var, state="readonly",
+                                          width=28, values=[label for label, _ in BACKEND_CHOICES])
+        self.backend_combo.grid(row=3, column=1, sticky="w", pady=(10, 0))
+
+        ttk.Label(options_frame, foreground="gray",
+                  text="提示：打印机驱动不支持的设置（如双面、彩色）会自动使用驱动默认值，并记录在日志中。"
+                  ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
     
     def _create_button_section(self, parent):
         """创建按钮区域"""
@@ -367,8 +382,14 @@ class PrintSettingsDialog:
         # 设置颜色模式
         self.color_var.set(self.current_settings.color_mode.value)
         
-        # 设置双面打印
-        self.duplex_var.set(self.current_settings.duplex)
+        # 设置单双面
+        self.duplex_var.set(self.current_settings.effective_duplex.value)
+
+        # Office 选项
+        self.force_page_setup_var.set(self.current_settings.office_force_page_setup)
+        backend_label = next((label for label, value in BACKEND_CHOICES
+                              if value == self.current_settings.office_backend), BACKEND_CHOICES[0][0])
+        self.backend_var.set(backend_label)
         
         print("打印设置加载完成（纸张使用默认列表，如需同步系统纸张请点击'同步纸张'按钮）")
 
@@ -397,7 +418,7 @@ class PrintSettingsDialog:
             if copies < 1 or copies > 999:
                 messagebox.showerror("错误", "打印数量必须在1-999之间")
                 return False
-        except:
+        except (tk.TclError, ValueError):
             messagebox.showerror("错误", "打印数量必须是有效数字")
             return False
         
@@ -405,13 +426,20 @@ class PrintSettingsDialog:
     
     def _create_settings_from_form(self) -> PrintSettings:
         """从表单创建打印设置对象"""
+        duplex_mode = DuplexMode(self.duplex_var.get() or DuplexMode.SIMPLEX.value)
+        backend = next((value for label, value in BACKEND_CHOICES if label == self.backend_var.get()),
+                       OfficeBackendPreference.AUTO)
         return PrintSettings(
             printer_name=self.printer_var.get(),
             paper_size=self.paper_var.get(),
             copies=self.copies_var.get(),
-            duplex=self.duplex_var.get(),
+            duplex=duplex_mode != DuplexMode.SIMPLEX,
+            duplex_mode=duplex_mode if duplex_mode != DuplexMode.SIMPLEX else DuplexMode.DUPLEX_LONG,
             color_mode=ColorMode(self.color_var.get()),
-            orientation=Orientation(self.orientation_var.get())
+            orientation=Orientation(self.orientation_var.get() or "auto"),
+            scaling=self.current_settings.scaling,
+            office_force_page_setup=self.force_page_setup_var.get(),
+            office_backend=backend,
         )
     
     def _on_ok(self):

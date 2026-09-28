@@ -2,6 +2,7 @@
 主窗口界面
 办公文档批量打印应用的主界面 (重构版本)
 """
+import queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
@@ -19,10 +20,18 @@ except ImportError:
 from src.core.document_manager import DocumentManager
 from src.core.settings_manager import PrinterSettingsManager
 from src.core.print_controller import PrintController
-from src.core.models import Document, PrintSettings, PrintStatus
+from src.core.models import Document, PrintStatus, OFFICE_FILE_TYPES
+from src.core.environment import EnvironmentReport, collect_environment
+from src.backends import process_utils
+from src.backends.office_backend import KIND_BY_FILE_TYPE
 from src.utils.config_utils import ConfigManager
+from src.utils.path_utils import get_app_icon_path, get_logs_dir
 from src.gui.print_settings_dialog import PrintSettingsDialog
 from src.gui.page_count_dialog import show_page_count_dialog
+from src.gui.environment_dialog import show_environment_dialog, show_about_dialog
+from src.version import APP_NAME, VERSION
+
+UI_POLL_MS = 100
 
 # 导入功能处理器
 from src.gui.components import FileImportHandler, ListOperationHandler, WindowManager, create_button_tooltip
@@ -31,8 +40,13 @@ from src.gui.components import FileImportHandler, ListOperationHandler, WindowMa
 class MainWindow:
     """主窗口类 (重构版本)"""
     
-    def __init__(self):
-        """初始化主窗口"""
+    def __init__(self, initial_paths: Optional[List[str]] = None):
+        """
+        初始化主窗口
+
+        Args:
+            initial_paths: 启动时要添加的文件/文件夹（例如拖到 exe 图标上的文件）
+        """
         # 创建支持拖拽的主窗口
         if DRAG_DROP_AVAILABLE:
             self.root = TkinterDnD.Tk()
@@ -52,9 +66,18 @@ class MainWindow:
         # 初始化功能处理器
         self._setup_handlers()
         
-        # 设置打印控制器
+        # 后台线程 → 界面线程的消息队列（Tkinter 控件只能在主线程中操作）
+        self._ui_queue: "queue.Queue" = queue.Queue()
+        self.env_report: Optional[EnvironmentReport] = None
+
+        # 设置打印控制器（回调在工作线程中执行，只向队列投递消息）
         self.print_controller.set_print_settings(self.current_print_settings)
-        self.print_controller.set_progress_callback(self._on_print_progress)
+        self.print_controller.set_progress_callback(
+            lambda cur, total, msg: self._ui_queue.put(("progress", (cur, total, msg))))
+        self.print_controller.set_document_callback(
+            lambda doc: self._ui_queue.put(("document", doc)))
+        self.print_controller.set_finished_callback(
+            lambda summary: self._ui_queue.put(("finished", summary)))
         
         # 创建界面
         self._create_widgets()
@@ -64,7 +87,12 @@ class MainWindow:
         # 设置窗口属性
         self._setup_window()
         
-        print("批量文档打印器已启动 (重构版本)")
+        # 启动界面消息轮询与后台环境检测
+        self.root.after(UI_POLL_MS, self._process_ui_queue)
+        if initial_paths:
+            self.root.after(200, lambda: self._add_initial_paths(initial_paths))
+        self._start_environment_check()
+        print(f"{APP_NAME} v{VERSION} 已启动")
     
     def _setup_handlers(self):
         """初始化功能处理器"""
@@ -84,10 +112,13 @@ class MainWindow:
     def _setup_window(self):
         """设置窗口属性"""
         # 设置窗口标题
-        self.window_manager.set_window_title("办公文档批量打印器", "v5.0 by.喵言喵语")
+        self.window_manager.set_window_title(APP_NAME, f"v{VERSION}")
+        icon = get_app_icon_path()
+        if icon.exists():
+            self.window_manager.set_window_icon(str(icon))
         
         # 设置窗口最小尺寸
-        self.window_manager.set_window_minimum_size(800, 500)
+        self.window_manager.set_window_minimum_size(900, 560)
         
         # 恢复窗口几何属性
         self.window_manager.restore_window_geometry(self.app_config)
@@ -99,6 +130,9 @@ class MainWindow:
         """创建界面组件"""
         # 工具栏
         self._create_toolbar()
+
+        # 环境状态栏（Office Backend / WPS 组件 / SumatraPDF）
+        self._create_environment_bar()
         
         # 主要内容区域
         self.main_frame = ttk.Frame(self.root)
@@ -162,6 +196,16 @@ class MainWindow:
             self.toolbar, text="使用说明", 
             command=self._show_help
         )
+
+        self.btn_env = ttk.Button(
+            self.toolbar, text="环境诊断",
+            command=self._show_environment
+        )
+
+        self.btn_about = ttk.Button(
+            self.toolbar, text="关于",
+            command=lambda: show_about_dialog(self.root)
+        )
         
         self.btn_calculate_pages = ttk.Button(
             self.toolbar, text="计算页数", 
@@ -174,6 +218,19 @@ class MainWindow:
             style="Accent.TButton"
         )
     
+    def _create_environment_bar(self):
+        """创建环境状态栏"""
+        self.env_bar = ttk.Frame(self.root)
+        self.lbl_backend = ttk.Label(self.env_bar, text="Office Backend: 检测中...")
+        self.lbl_wps_components = ttk.Label(self.env_bar, text="")
+        self.lbl_sumatra = ttk.Label(self.env_bar, text="")
+        self.lbl_env_warning = ttk.Label(self.env_bar, text="", foreground="#b35900", cursor="hand2")
+        self.lbl_backend.pack(side="left", padx=(3, 12))
+        self.lbl_wps_components.pack(side="left", padx=(0, 12))
+        self.lbl_sumatra.pack(side="left", padx=(0, 12))
+        self.lbl_env_warning.pack(side="left")
+        self.lbl_env_warning.bind("<Button-1>", lambda e: self._show_environment())
+
     def _create_document_list(self):
         """创建文档列表组件"""
         # 创建标题框架
@@ -197,7 +254,7 @@ class MainWindow:
         # 文件类型勾选框变量
         self.var_word = tk.BooleanVar(value=self.app_config.enabled_file_types.get('word', True))
         self.var_ppt = tk.BooleanVar(value=self.app_config.enabled_file_types.get('ppt', True))
-        self.var_excel = tk.BooleanVar(value=self.app_config.enabled_file_types.get('excel', False))
+        self.var_excel = tk.BooleanVar(value=self.app_config.enabled_file_types.get('excel', True))
         self.var_pdf = tk.BooleanVar(value=self.app_config.enabled_file_types.get('pdf', True))
         self.var_image = tk.BooleanVar(value=self.app_config.enabled_file_types.get('image', True))
         self.var_text = tk.BooleanVar(value=self.app_config.enabled_file_types.get('text', True))
@@ -208,15 +265,15 @@ class MainWindow:
         
         # 文件类型勾选框
         self.chk_word = ttk.Checkbutton(
-            parent, text="Word", variable=self.var_word,
+            parent, text="文字", variable=self.var_word,
             command=self._on_filter_changed
         )
         self.chk_ppt = ttk.Checkbutton(
-            parent, text="PPT", variable=self.var_ppt,
+            parent, text="演示", variable=self.var_ppt,
             command=self._on_filter_changed
         )
         self.chk_excel = ttk.Checkbutton(
-            parent, text="Excel", variable=self.var_excel,
+            parent, text="表格", variable=self.var_excel,
             command=self._on_filter_changed
         )
         self.chk_pdf = ttk.Checkbutton(
@@ -247,7 +304,7 @@ class MainWindow:
         tree_frame.pack(fill="both", expand=True)
         
         # 创建Treeview
-        columns = ("文件名", "类型", "大小", "状态", "路径")
+        columns = ("文件名", "类型", "大小", "状态", "路径", "备注")
         self.doc_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=15)
         
         # 设置列标题和宽度
@@ -256,12 +313,17 @@ class MainWindow:
         self.doc_tree.heading("大小", text="大小(MB)")
         self.doc_tree.heading("状态", text="状态")
         self.doc_tree.heading("路径", text="文件路径")
+        self.doc_tree.heading("备注", text="备注")
         
-        self.doc_tree.column("文件名", width=240)
-        self.doc_tree.column("类型", width=80)
-        self.doc_tree.column("大小", width=80)
-        self.doc_tree.column("状态", width=50)
-        self.doc_tree.column("路径", width=310)
+        self.doc_tree.column("文件名", width=220)
+        self.doc_tree.column("类型", width=70)
+        self.doc_tree.column("大小", width=65)
+        self.doc_tree.column("状态", width=65)
+        self.doc_tree.column("路径", width=280)
+        self.doc_tree.column("备注", width=220)
+        self.doc_tree.tag_configure("error", foreground="#c00000")
+        self.doc_tree.tag_configure("ok", foreground="#1a7f37")
+        self.doc_tree.tag_configure("printing", foreground="#0550ae")
         
         # 滚动条
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.doc_tree.yview)
@@ -317,6 +379,8 @@ class MainWindow:
         self.btn_clear.pack(side="left", padx=3)
         self.btn_print_settings.pack(side="left", padx=3)
         self.btn_help.pack(side="left", padx=3)
+        self.btn_env.pack(side="left", padx=3)
+        self.btn_about.pack(side="left", padx=3)
         
         # 右侧按钮 - 统一间距
         self.btn_start_print.pack(side="right", padx=3)
@@ -324,6 +388,7 @@ class MainWindow:
         
         # 主框架布局
         self.toolbar.pack(fill="x", padx=10, pady=5)
+        self.env_bar.pack(fill="x", padx=10)
         self.main_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
         # 主内容布局
@@ -358,13 +423,13 @@ class MainWindow:
         """设置界面提示功能"""
         # 只为文件类型过滤器添加tooltip
         create_button_tooltip(self.chk_word, 
-            "Word文档过滤器\n支持格式: .doc, .docx, .wps")
+            "文字文档过滤器（WPS 文字 / Word）\n支持格式: .doc, .docx, .wps")
         
         create_button_tooltip(self.chk_ppt, 
-            "PowerPoint演示文稿过滤器\n支持格式: .ppt, .pptx, .dps")
+            "演示文稿过滤器（WPS 演示 / PowerPoint）\n支持格式: .ppt, .pptx, .dps")
         
         create_button_tooltip(self.chk_excel, 
-            "Excel表格过滤器\n支持格式: .xls, .xlsx, .et\n注意:此格式只能模糊统计页数，请先手动再文件内排版好再打印")
+            "表格过滤器（WPS 表格 / Excel）\n支持格式: .xls, .xlsx, .et\n打印整个工作簿的所有可见工作表，遵循各表的打印区域和页面设置")
         
         create_button_tooltip(self.chk_pdf, 
             "PDF文档过滤器\n支持标准PDF文件")
@@ -475,69 +540,192 @@ class MainWindow:
             print("打印设置已更新")
     
     def _start_printing(self):
-        """开始批量打印"""
+        """开始批量打印 / 打印中点击则停止"""
         if self.print_controller.is_printing:
-            messagebox.showwarning("提示", "打印任务正在进行中")
+            self._stop_printing()
             return
-        
         if self.document_manager.document_count == 0:
             messagebox.showwarning("提示", "请先添加要打印的文档")
             return
-        
-        # 检查是否已设置打印机，如果没有则强制打开设置对话框
-        if not self.current_print_settings.printer_name:
-            if messagebox.askyesno("需要设置打印机", "检测到尚未设置打印机，是否现在进行设置？"):
-                self._show_print_settings()
-                # 检查用户是否完成了设置
-                if not self.current_print_settings.printer_name:
-                    messagebox.showinfo("取消打印", "未完成打印机设置，打印操作已取消")
-                    return
-            else:
-                messagebox.showinfo("取消打印", "需要设置打印机才能开始打印")
-                return
-        
-        # 确认开始打印
-        if not messagebox.askyesno("确认", f"确定要打印 {self.document_manager.document_count} 个文档吗？"):
+        self._launch_print(self.document_manager.documents)
+
+    def _stop_printing(self):
+        if messagebox.askyesno("停止打印", "当前文件打印完成后停止，剩余文件标记为“已取消”。\n确定停止吗？"):
+            self.print_controller.cancel_current_print()
+            self.btn_start_print.config(text="正在停止...", state="disabled")
+            self.lbl_print_status.config(text="正在停止...")
+
+    def _ensure_printer_selected(self) -> bool:
+        """检查是否已设置打印机，没有则引导用户设置"""
+        if self.current_print_settings.printer_name:
+            return True
+        if messagebox.askyesno("需要设置打印机", "检测到尚未设置打印机，是否现在进行设置？"):
+            self._show_print_settings()
+            if self.current_print_settings.printer_name:
+                return True
+            messagebox.showinfo("取消打印", "未完成打印机设置，打印操作已取消")
+        else:
+            messagebox.showinfo("取消打印", "需要设置打印机才能开始打印")
+        return False
+
+    def _office_precheck(self, documents: List[Document]) -> bool:
+        """Office 组件与正在运行的 WPS 检查，返回是否继续"""
+        office_docs = [d for d in documents if d.file_type in OFFICE_FILE_TYPES]
+        if not office_docs:
+            return True
+        report = self.env_report
+        if report is not None and report.selection is not None:
+            missing = []
+            for kind in {KIND_BY_FILE_TYPE[d.file_type] for d in office_docs}:
+                backend, message = report.selection.backend_for(kind)
+                if backend is None:
+                    missing.append(message)
+            if missing:
+                if not messagebox.askyesno(
+                        "Office 组件不可用",
+                        "\n\n".join(missing) + "\n\n这些文件将打印失败（其它文件不受影响）。是否继续？"):
+                    return False
+        running = process_utils.list_running({"wps.exe", "et.exe", "wpp.exe"})
+        if running:
+            return messagebox.askyesno(
+                "WPS 正在运行",
+                "检测到 WPS 正在运行：\n" + "\n".join(running) +
+                "\n\n为避免批量打印影响您正在编辑的文档，并确保卡死时可以自动恢复，"
+                "建议先保存并关闭 WPS。\n\n是否仍然继续打印？")
+        return True
+
+    def _launch_print(self, documents: List[Document]):
+        if not self._ensure_printer_selected():
             return
-        
+        if not self._office_precheck(documents):
+            return
+        count = len(documents)
+        s = self.current_print_settings
+        detail = (f"打印机：{s.printer_name}\n纸张：{s.paper_size}  方向：{s.orientation_display}\n"
+                  f"{s.duplex_display}  {s.color_display}  份数：{s.copies}")
+        if not messagebox.askyesno("确认", f"确定要打印 {count} 个文档吗？\n\n{detail}"):
+            return
         try:
-            # 添加文档到打印队列
-            documents = self.document_manager.documents
             self.print_controller.clear_queue()
             self.print_controller.add_documents_to_queue(documents)
-            
-            # 开始打印
-            future = self.print_controller.start_batch_print()
-            
-            # 禁用开始打印按钮
-            self.btn_start_print.config(state="disabled")
-            
-            print("批量打印任务已启动")
-            
-        except Exception as e:
+            self.print_controller.start_batch_print()
+        except Exception as e:  # noqa: BLE001 - 显示给用户
             messagebox.showerror("错误", f"启动打印失败: {e}")
-    
+            return
+        self.progress_bar['value'] = 0
+        self.btn_start_print.config(text="停止打印")
+        self.btn_calculate_pages.config(state="disabled")
+        self.lbl_print_status.config(text=f"打印中 (0/{count})")
+        print(f"批量打印任务已启动，共 {count} 个文档")
+
+    def _add_initial_paths(self, paths: List[str]):
+        added = self.file_import_handler.process_dropped_paths(paths)
+        if added:
+            self._refresh_document_list(force_rebuild=True)
+            self._update_status()
+
+    # === 后台线程消息处理（主线程） ===
+    def _process_ui_queue(self):
+        try:
+            while True:
+                kind, payload = self._ui_queue.get_nowait()
+                try:
+                    if kind == "progress":
+                        self._on_print_progress(*payload)
+                    elif kind == "document":
+                        self._update_document_row(payload)
+                    elif kind == "finished":
+                        self._on_print_finished(payload)
+                    elif kind == "environment":
+                        self._apply_environment_report(payload)
+                except Exception as e:  # noqa: BLE001 - 单条消息异常不影响后续
+                    print(f"界面更新失败: {e}")
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(UI_POLL_MS, self._process_ui_queue)
+        except tk.TclError:
+            pass  # 窗口已销毁
+
     def _on_print_progress(self, current: int, total: int, message: str):
-        """打印进度回调"""
-        # 更新进度条
-        progress = (current / total) * 100
+        """打印进度（主线程）"""
+        progress = (current / total) * 100 if total else 100
         self.progress_bar['value'] = progress
-        
-        # 更新状态标签
         self.lbl_progress.config(text=f"{current}/{total} - {message}")
-        self.lbl_print_status.config(text=f"打印中 ({current}/{total})")
-        
-        # 如果打印完成，重新启用按钮
-        if current >= total:
-            self.btn_start_print.config(state="normal")
-            self.lbl_print_status.config(text="打印完成")
-            self._refresh_document_list()  # 刷新状态显示
+        if self.print_controller.is_printing:
+            self.lbl_print_status.config(text=f"打印中 ({current}/{total})")
+
+    def _on_print_finished(self, summary):
+        """批次结束（主线程）"""
+        self.btn_start_print.config(text="开始打印", state="normal")
+        self._update_status()
+        self._refresh_document_list()
+        self.progress_bar['value'] = 100
+        self.lbl_print_status.config(text=f"打印完成：{summary.text()}")
+        self.lbl_progress.config(text=f"{summary.total}/{summary.total} - 批量打印完成！{summary.text()}")
+        lines = [f"批量打印完成：{summary.text()}（共 {summary.total} 个）"]
+        if summary.fatal_error:
+            lines.append(f"\n错误：{summary.fatal_error}")
+        failed = [r for r in summary.records if not r.success]
+        if failed:
+            lines.append("\n失败的文件：")
+            for record in failed[:10]:
+                lines.append(f"• {Path(record.file).name}：{record.error}")
+            if len(failed) > 10:
+                lines.append(f"……另有 {len(failed) - 10} 个")
+        if summary.warnings:
+            lines.append("\n打印机设置提示：")
+            lines.extend(f"• {w}" for w in summary.warnings)
+        lines.append(f"\n打印日志：{summary.log_file}")
+        if summary.failed or summary.fatal_error:
+            messagebox.showwarning("打印完成（有失败）", "\n".join(lines))
+        else:
+            messagebox.showinfo("打印完成", "\n".join(lines))
+
+    # === 环境检测 ===
+    def _start_environment_check(self):
+        preference = self.current_print_settings.office_backend.value
+
+        def worker():
+            try:
+                report = collect_environment(preference)
+                print(report.text())
+                self._ui_queue.put(("environment", report))
+            except Exception as e:  # noqa: BLE001
+                print(f"环境检测失败: {e}")
+
+        threading.Thread(target=worker, name="EnvCheck", daemon=True).start()
+
+    def _apply_environment_report(self, report: EnvironmentReport):
+        self.env_report = report
+        self.lbl_backend.config(text=f"Office Backend: {report.backend_label()}")
+        if report.wps:
+            self.lbl_wps_components.config(text="  ".join(s.summary() for s in report.wps.values()))
+        self.lbl_sumatra.config(text=f"SumatraPDF {'✓' if report.sumatra_ok else '✗'}")
+        problems = report.problems()
+        if problems:
+            first = problems[0] if len(problems[0]) <= 36 else problems[0][:35] + "…"
+            more = f" 等 {len(problems)} 项" if len(problems) > 1 else ""
+            self.lbl_env_warning.config(text=f"⚠ {first}{more}（点击查看诊断）")
+        else:
+            self.lbl_env_warning.config(text="")
+
+    def _show_environment(self):
+        if self.env_report is None:
+            messagebox.showinfo("环境诊断", "正在检测运行环境，请稍候再试")
+            return
+        show_environment_dialog(self.root, self.env_report,
+                                self.current_print_settings.office_backend.value,
+                                on_updated=self._apply_environment_report)
     
     # === 页数统计相关 ===
     def _calculate_pages(self):
         """计算页数"""
         if self.document_manager.document_count == 0:
             messagebox.showwarning("提示", "请先添加要统计的文档")
+            return
+        if self.print_controller.is_printing:
+            messagebox.showwarning("提示", "正在打印，请等待打印完成后再统计页数")
             return
         
         # 显示页数统计对话框
@@ -550,6 +738,9 @@ class MainWindow:
         selected_documents = self.list_operation_handler.get_selected_document_objects()
         if not selected_documents:
             messagebox.showwarning("提示", "请先选择要计算页数的文档")
+            return
+        if self.print_controller.is_printing:
+            messagebox.showwarning("提示", "正在打印，请等待打印完成后再统计页数")
             return
         
         # 调用页数统计功能
@@ -573,71 +764,43 @@ class MainWindow:
             # 智能更新：只更新状态发生变化的项目
             self._update_document_list_status()
     
+    @staticmethod
+    def _row_values(doc: Document):
+        return (doc.file_name, doc.type_display, doc.size_mb, doc.status_display,
+                str(doc.file_path), doc.last_error)
+
+    @staticmethod
+    def _row_tags(doc: Document):
+        return {PrintStatus.ERROR: ("error",), PrintStatus.COMPLETED: ("ok",),
+                PrintStatus.PRINTING: ("printing",)}.get(doc.print_status, ())
+
     def _rebuild_document_list(self):
-        """完全重建文档列表"""
-        # 保存当前选中状态
-        selected_items = self.doc_tree.selection()
-        selected_file_paths = []
-        for item in selected_items:
-            values = self.doc_tree.item(item, 'values')
-            if values and len(values) > 4:
-                selected_file_paths.append(values[4])  # 文件路径在第5列
-        
-        # 清空现有项目
+        """完全重建文档列表（行 iid 使用文档 id，便于按文档更新状态）"""
+        selected_ids = set(self.doc_tree.selection())
         for item in self.doc_tree.get_children():
             self.doc_tree.delete(item)
-        
-        # 添加文档
         for doc in self.document_manager.documents:
-            status_text = {
-                PrintStatus.PENDING: "待打印",
-                PrintStatus.PRINTING: "打印中",
-                PrintStatus.COMPLETED: "已完成",
-                PrintStatus.ERROR: "失败"
-            }.get(doc.print_status, "未知")
-            
-            item_id = self.doc_tree.insert("", "end", values=(
-                doc.file_name,
-                doc.type_display,
-                doc.size_mb,
-                status_text,
-                str(doc.file_path)
-            ))
-            
-            # 恢复选中状态
-            if str(doc.file_path) in selected_file_paths:
-                self.doc_tree.selection_add(item_id)
-        
-        # 保持排序指示器显示
+            self.doc_tree.insert("", "end", iid=doc.id, values=self._row_values(doc), tags=self._row_tags(doc))
+            if doc.id in selected_ids:
+                self.doc_tree.selection_add(doc.id)
         if self.list_operation_handler:
             self.list_operation_handler.maintain_sort_indicators()
-    
+
+    def _update_document_row(self, doc: Document):
+        """更新单个文档行（主线程）"""
+        if self.doc_tree.exists(doc.id):
+            self.doc_tree.item(doc.id, values=self._row_values(doc), tags=self._row_tags(doc))
+            if doc.print_status == PrintStatus.PRINTING:
+                self.doc_tree.see(doc.id)
+
     def _update_document_list_status(self):
-        """智能更新文档列表状态（只更新变化的项目）"""
-        items = self.doc_tree.get_children()
+        """智能更新文档列表状态"""
         documents = self.document_manager.documents
-        
-        if len(items) != len(documents):
-            # 长度不匹配，回退到完全重建
+        if len(self.doc_tree.get_children()) != len(documents):
             self._rebuild_document_list()
             return
-        
-        # 逐项检查和更新状态
-        for item, doc in zip(items, documents):
-            current_values = list(self.doc_tree.item(item, 'values'))
-            
-            # 获取新的状态文本
-            new_status_text = {
-                PrintStatus.PENDING: "待打印",
-                PrintStatus.PRINTING: "打印中",
-                PrintStatus.COMPLETED: "已完成",
-                PrintStatus.ERROR: "失败"
-            }.get(doc.print_status, "未知")
-            
-            # 如果状态发生变化，更新这一项
-            if len(current_values) > 3 and current_values[3] != new_status_text:
-                current_values[3] = new_status_text
-                self.doc_tree.item(item, values=current_values)
+        for doc in documents:
+            self._update_document_row(doc)
     
     def _update_status(self):
         """更新状态显示"""
@@ -745,43 +908,10 @@ class MainWindow:
         if not selected_documents:
             messagebox.showwarning("提示", "请先选择要打印的文档")
             return
-        
         if self.print_controller.is_printing:
             messagebox.showwarning("提示", "打印任务正在进行中")
             return
-        
-        # 检查是否已设置打印机，如果没有则强制打开设置对话框
-        if not self.current_print_settings.printer_name:
-            if messagebox.askyesno("需要设置打印机", "检测到尚未设置打印机，是否现在进行设置？"):
-                self._show_print_settings()
-                # 检查用户是否完成了设置
-                if not self.current_print_settings.printer_name:
-                    messagebox.showinfo("取消打印", "未完成打印机设置，打印操作已取消")
-                    return
-            else:
-                messagebox.showinfo("取消打印", "需要设置打印机才能开始打印")
-                return
-        
-        # 确认打印
-        count = len(selected_documents)
-        if not messagebox.askyesno("确认", f"确定要打印选中的 {count} 个文档吗？"):
-            return
-        
-        try:
-            # 添加选中文档到打印队列
-            self.print_controller.clear_queue()
-            self.print_controller.add_documents_to_queue(selected_documents)
-            
-            # 开始打印
-            future = self.print_controller.start_batch_print()
-            
-            # 禁用开始打印按钮
-            self.btn_start_print.config(state="disabled")
-            
-            print(f"已开始打印选中的 {count} 个文档")
-            
-        except Exception as e:
-            messagebox.showerror("错误", f"启动打印失败: {e}")
+        self._launch_print(selected_documents)
     
     def _reset_sort(self):
         """重置排序"""
@@ -810,119 +940,81 @@ class MainWindow:
     
     def _on_window_closing(self):
         """窗口关闭事件处理"""
-        # 检查是否有打印任务正在进行
         if self.print_controller.is_printing:
-            if not messagebox.askyesno("确认", "打印任务正在进行中，确定要退出吗？"):
-                return False  # 取消关闭
-        
-        # 保存窗口几何属性
+            if not messagebox.askyesno("确认", "打印任务正在进行中，退出将中止当前任务。\n确定要退出吗？"):
+                return False
+            # 立即结束本程序启动的 WPS 进程，工作线程随后会恢复默认打印机与打印参数
+            self.print_controller.cancel_current_print(force=True)
         self.window_manager.save_window_geometry(self.app_config)
-        
-        return True  # 允许关闭
+        return True
     
     # === 使用说明 ===
     def _show_help(self):
         """显示使用说明"""
-        help_text = """
-📖 办公文档批量打印器使用说明 V5.0
+        help_text = f"""
+📖 {APP_NAME} v{VERSION} 使用说明
 
 ═══════════════════════════════════════
 
-🎯 软件功能
-• 批量添加和打印多种格式文档
-• 方便的过滤各种文档
-• 灵活的打印设置配置
-• 便捷的文档管理
-• 页数统计功能
+🎯 软件定位
+Windows + WPS Office 批量打印工具。只安装 WPS Office、未安装 Microsoft Office
+也能批量打印 Office 文档；PDF 与图片无需 WPS/Office。
 
 ═══════════════════════════════════════
 
 📂 支持的文件格式
 
-📝 Office文档：
-   • Word文档：.doc, .docx, .wps (WPS文字)
-   • PowerPoint：.ppt, .pptx, .dps (WPS演示)  
-   • Excel表格：.xls, .xlsx, .et (WPS表格)
-   请慎重选择excel格式，使用前先在文件内把打印排版调校好
+• 文字文档：.doc .docx .wps        → WPS 文字（KWPS.Application）
+• 表格：    .xls .xlsx .et          → WPS 表格（KET.Application）
+• 演示文稿：.ppt .pptx .dps        → WPS 演示（KWPP.Application）
+• PDF：     .pdf                    → 内置 SumatraPDF
+• 图片：    .jpg .jpeg .png .bmp .tiff .tif .webp → SumatraPDF（备用 GDI）
+• 文本：    .txt                    → Windows GDI 直接打印
 
-📄 通用文档：
-   • PDF文件：.pdf
-   • 文本文件：.txt
-
-🖼️ 图片文件：
-   • 常见格式：.jpg, .jpeg, .png, .bmp
-   • 高级格式：.tiff, .tif, .webp
-   • 注意：TIFF可能包含多页，其他按1页计算
+未安装 WPS 时，可在“打印设置 → Office 引擎”中改用 Microsoft Office。
 
 ═══════════════════════════════════════
 
 📋 使用步骤
 
-1 文件类型过滤
-   • 勾选/取消勾选各种文件类型过滤器
-   • Word、PPT、Excel、PDF、图片、文本独立控制
-   • 鼠标悬停过滤器可查看支持的扩展名
-
-2 添加文档
-   • 点击按钮添加选择单个或多个文档以及文件夹
-   • 直接拖拽文件或文件夹到程序窗口进行快速添加
-   • 支持递归搜索子文件夹
-
-3 管理文档
-   • 可单、多选文档后进行操作
-   • 双击文档可用默认程序打开预览
-
-4 页数统计
-   • 点击"计算页数"统计所有文档的页数
-   • 可多选后用右键统计选中文档
-   • 可导出统计结果到Excel
-
-5 配置打印
-   • 点击"打印设置"配置打印参数
-   • 选择打印机、纸张尺寸、页面方向
-   • 设置打印份数、双面打印、颜色模式
-
-6 开始打印
-   • 确认文档列表和打印设置
-   • 点击"开始打印"执行批量打印
-   • 观察进度条了解打印状态
-   • 支持右键菜单打印选中文档
+1. 拖入文件或文件夹（或点击“添加文件/添加文件夹”），自动识别类型
+2. 点击“打印设置”：选择打印机、份数、纸张、单双面、方向、彩色/黑白
+3. 点击“开始打印”，列表中实时显示 等待 / 正在打印 / 成功 / 失败
+4. 打印完成后显示“成功 N，失败 M”，失败原因显示在“备注”列
+5. 打印中可点击“停止打印”，当前文件完成后停止
 
 ═══════════════════════════════════════
 
-🚀 v5.0 新特性
+⚙️ 打印参数说明
 
-🏗️ 架构升级：
-   • 重新编写构架使用模块化文件处理器设计
-
-📈 功能增强：
-   • 新增图片文件支持（.jpg, .png, .bmp, .tiff, .webp等）
-   • 新增文本文件支持（.txt）
-   • 新增WPS格式完整支持（.wps, .dps, .et）
-   • 新增文件过滤功能
-   • 新增右键增强功能
-   • 新增文件排序功能
-   • 新增浮窗提示功能
-🔧 技术改进：
-   • 优化拖拽导入功能
-   • 增强双面打印成功率
-   • 修复PDF偶尔无法打印问题
-   • 修复纸张规格无法同步问题
+• 纸张/方向：PDF、图片、文本直接生效；文字/表格文档默认遵循文档自身页面设置，
+  勾选“Office 文档也强制使用以上纸张和方向”后才会覆盖（不会保存到原文件）
+• 单双面/彩色：通过打印机的“每用户默认打印参数”设置，结束后自动恢复
+• 打印机驱动不支持的设置会使用驱动默认值，并在日志和完成提示中说明
+• 打印 Office 文档时，若目标打印机不是系统默认打印机，程序会临时将其设为默认，
+  打印结束（包括出错、取消）后自动恢复；即使程序意外退出，下次启动也会恢复
 
 ═══════════════════════════════════════
 
-💡 使用提示
+🛡️ 稳定性
 
-• Excel和文本文件页数为估算值，打印前建议预览确认
-• 大文件处理可能需要较长时间，请耐心等待
-• 确保打印机驱动程序正确安装
-• 建议定期检查打印机连接状态
-• 支持的最大文本文件大小：100MB
+• 单个文件失败不影响后续文件
+• WPS 卡死超时（文字 3 分钟、表格/演示 5 分钟）会被强制结束并继续下一个文件
+• 只结束本程序启动的 WPS 进程，不会影响您自己打开的 WPS
+• 建议批量打印前保存并关闭正在编辑的 WPS 文档
 
 ═══════════════════════════════════════
 
-💝 感谢使用办公文档批量打印器！
-开发者：喵言喵语 by.52pojie
+🔍 故障排查
+
+• 点击“环境诊断”查看 WPS 文字/表格/演示 COM 是否可用，可做“深度检测”
+• 日志目录：{get_logs_dir()}
+  - app.log：运行日志
+  - print_YYYYMMDD.log：每个打印任务的记录（文件、打印机、参数、结果、耗时）
+
+═══════════════════════════════════════
+
+基于 batch-document-printer（作者 喵言喵语，MIT 许可）二次开发。
         """
         
         # 创建帮助窗口
@@ -986,6 +1078,9 @@ class MainWindow:
         
         # 启动主循环
         self.root.mainloop()
+
+        # 窗口关闭后等待打印线程结束：确保 WPS 进程已退出、默认打印机与打印参数已恢复
+        self.print_controller.shutdown(wait=True)
 
 
 def main():

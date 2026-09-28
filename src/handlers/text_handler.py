@@ -1,283 +1,128 @@
 """
-文本文档处理器
-处理TXT文件的打印和页数统计功能
+文本文档处理器（TXT）
+
+主方案：Windows GDI 直接打印（可指定打印机、份数，中文编码自动识别）
+备用方案：notepad /pt 打印到指定打印机
 """
 import os
-import sys
 import subprocess
 from pathlib import Path
-from typing import Set, Dict, Any
+from typing import Any, Dict, Optional, Set, Tuple
 
-# 添加项目根目录到Python路径
-project_root = Path(__file__).parents[2]
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+from ..core.models import FileType, PrintSettings
+from ..core.print_context import PrintContext, PrintJobError
+from .base_handler import BaseDocumentHandler
+from . import gdi_print, sumatra
 
-from src.core.models import FileType
-from src.handlers.base_handler import BaseDocumentHandler
+ENCODINGS = ('utf-8-sig', 'utf-16', 'gb18030', 'big5', 'latin1')
+MAX_TEXT_MB = 100
+
+
+def _is_likely_text(content: str) -> bool:
+    if not content:
+        return True
+    printable = sum(1 for c in content if c.isprintable() or c.isspace())
+    return printable / len(content) >= 0.8
+
+
+def read_text_file(file_path: Path) -> Tuple[str, str]:
+    """读取文本文件，返回 (内容, 编码)"""
+    data = file_path.read_bytes()
+    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
+        return data.decode("utf-16"), "utf-16"
+    for encoding in ENCODINGS:
+        if encoding == 'utf-16':
+            continue
+        try:
+            text = data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if _is_likely_text(text[:2000]):
+            return text, encoding
+    raise ValueError(f"无法识别文件编码或疑似二进制文件: {file_path.name}")
 
 
 class TextDocumentHandler(BaseDocumentHandler):
     """文本文档处理器"""
-    
-    def __init__(self):
-        """初始化文本处理器"""
-        super().__init__()
-        
-        # 支持的文本格式（目前只支持TXT）
-        self._supported_extensions = {'.txt'}
-        self._supported_file_types = {FileType.TEXT}
-        
-        # 文本文件页数估算参数
-        self._chars_per_line = 75  # 每行字符数（考虑打印边距）
-        self._lines_per_page = 50  # 每页行数（考虑页边距）
-        
+
+    _chars_per_line = 75
+    _lines_per_page = 50
+
     def get_handler_name(self) -> str:
-        """获取处理器名称"""
-        return "文本文档处理器"
-    
+        return "文本处理器"
+
+    def describe_backend(self, context: Optional[PrintContext] = None) -> str:
+        if context is not None and context.backend_used:
+            return context.backend_used
+        return "Windows GDI"
+
     def get_supported_file_types(self) -> Set[FileType]:
-        """获取支持的文件类型"""
-        return self._supported_file_types.copy()
-    
+        return {FileType.TEXT}
+
     def get_supported_extensions(self) -> Set[str]:
-        """获取支持的文件扩展名"""
-        return self._supported_extensions.copy()
-    
+        return {'.txt'}
+
     def can_handle_file(self, file_path: Path) -> bool:
-        """
-        检查是否可以处理指定文件
-        
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            是否可以处理
-        """
-        if not file_path.exists() or not file_path.is_file():
+        if not super().can_handle_file(file_path):
             return False
-        
-        extension = file_path.suffix.lower()
-        if extension not in self._supported_extensions:
+        if self.get_file_size_mb(file_path) > MAX_TEXT_MB:
             return False
-        
-        # 基本文件验证
         try:
-            # 检查文件大小（避免处理过大的文本文件）
-            file_size_mb = file_path.stat().st_size / (1024 * 1024)
-            if file_size_mb > 100:  # 限制100MB
-                print(f"文本文件过大: {file_path.name} ({file_size_mb:.1f}MB)")
-                return False
-            
-            # 验证TXT文件编码
-            return self._validate_txt_file(file_path)
-                
-        except Exception as e:
-            print(f"验证文本文件失败 {file_path}: {e}")
-            return False
-    
-    def _validate_txt_file(self, file_path: Path) -> bool:
-        """验证TXT文件"""
-        try:
-            # 尝试用不同编码读取文件开头
-            encodings = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'latin1']
-            
-            for encoding in encodings:
-                try:
-                    with open(file_path, 'r', encoding=encoding) as f:
-                        # 读取前2KB验证编码
-                        content = f.read(2048)
-                        # 检查是否包含大量二进制字符（可能不是文本文件）
-                        if self._is_likely_text(content):
-                            return True
-                except (UnicodeDecodeError, UnicodeError):
-                    continue
-            
-            print(f"无法识别TXT文件编码或疑似二进制文件: {file_path.name}")
-            return False
-            
-        except Exception:
-            return False
-    
-    def _is_likely_text(self, content: str) -> bool:
-        """判断内容是否为文本"""
-        if not content:
+            read_text_file(file_path)
             return True
-        
-        # 计算可打印字符的比例
-        printable_chars = sum(1 for c in content if c.isprintable() or c.isspace())
-        ratio = printable_chars / len(content)
-        
-        # 如果80%以上是可打印字符，认为是文本文件
-        return ratio >= 0.8
-    
-    def count_pages(self, file_path: Path) -> int:
-        """
-        统计TXT文件页数
-        
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            页数
-        """
-        if not self.can_handle_file(file_path):
-            raise ValueError(f"无法处理的文本文件: {file_path}")
-        
-        return self._count_txt_pages(file_path)
-    
-    def _count_txt_pages(self, file_path: Path) -> int:
-        """统计TXT文件页数（估算）"""
-        try:
-            # 检测文件编码并读取内容
-            content = self._read_txt_with_encoding(file_path)
-            if not content:
-                return 1
-            
-            # 按行分割
-            lines = content.split('\n')
-            total_lines = 0
-            
-            for line in lines:
-                # 计算每行实际占用的行数（考虑自动换行）
-                line_length = len(line.rstrip())  # 去除行尾空格
-                if line_length == 0:
-                    total_lines += 1  # 空行
-                else:
-                    # 计算自动换行导致的行数
-                    wrapped_lines = (line_length + self._chars_per_line - 1) // self._chars_per_line
-                    total_lines += max(wrapped_lines, 1)
-            
-            # 计算页数
-            pages = (total_lines + self._lines_per_page - 1) // self._lines_per_page
-            return max(pages, 1)
-            
-        except Exception as e:
-            print(f"TXT页数统计失败 {file_path}: {e}")
-            return 1
-    
-    def _read_txt_with_encoding(self, file_path: Path) -> str:
-        """使用合适的编码读取TXT文件"""
-        encodings = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'utf-16le', 'latin1']
-        
-        for encoding in encodings:
-            try:
-                with open(file_path, 'r', encoding=encoding) as f:
-                    content = f.read()
-                    # 验证读取的内容是否合理
-                    if self._is_likely_text(content[:1000]):  # 检查前1000字符
-                        return content
-            except (UnicodeDecodeError, UnicodeError):
-                continue
-        
-        raise ValueError(f"无法解码文件: {file_path}")
-    
-    def print_document(self, file_path: Path, settings: Any) -> bool:
-        """
-        打印TXT文档
-        
-        Args:
-            file_path: 文件路径
-            settings: 打印设置
-            
-        Returns:
-            打印是否成功
-        """
-        try:
-            if not self.can_handle_file(file_path):
-                raise ValueError(f"无法处理的文本文件: {file_path}")
-            
-            print(f"开始打印文本文件: {file_path.name}")
-            
-            if os.name == 'nt':  # Windows系统
-                return self._print_txt_windows(file_path, settings)
-            else:
-                print("非Windows系统的文本打印功能需要手动实现")
-                return False
-                
-        except Exception as e:
-            print(f"打印文本文档失败 {file_path.name}: {e}")
+        except (OSError, ValueError):
             return False
-    
-    def _print_txt_windows(self, file_path: Path, settings: Any) -> bool:
-        """在Windows上打印TXT文件"""
+
+    def count_pages(self, file_path: Path, context: Optional[PrintContext] = None) -> int:
+        """估算页数（与 GDI 打印版式接近：每行约 75 字符，每页 50 行）"""
+        text, _ = read_text_file(file_path)
+        pages = gdi_print.layout_text(text, len, self._chars_per_line, self._lines_per_page)
+        return max(1, len(pages))
+
+    def print_document(self, file_path: Path, settings: PrintSettings,
+                       context: Optional[PrintContext] = None) -> bool:
+        context = context or PrintContext()
+        printer = settings.printer_name
+        if not printer:
+            raise PrintJobError("未设置打印机")
         try:
-            # 方法1: 使用notepad打印（最直接的方式）
+            text, encoding = read_text_file(file_path)
+        except (OSError, ValueError) as e:
+            raise PrintJobError(str(e)) from e
+        try:
+            pages = gdi_print.print_text(printer, file_path.name, text, settings.copies, context.log)
+            context.backend_used = "Windows GDI"
+            context.notes.append(f"编码 {encoding}，每份 {pages} 页")
+            return True
+        except ImportError as e:
+            context.log(f"GDI 组件不可用（{e}），改用记事本打印")
+        except PrintJobError as e:
+            context.log(f"GDI 文本打印失败（{e}），改用记事本打印")
+        return self._print_with_notepad(file_path, printer, settings.copies, context)
+
+    def _print_with_notepad(self, file_path: Path, printer: str, copies: int, context: PrintContext) -> bool:
+        if os.name != 'nt':
+            raise PrintJobError("文本打印仅支持 Windows")
+        for _ in range(max(1, copies)):
             try:
-                result = subprocess.run([
-                    'notepad.exe', '/p', str(file_path)
-                ], capture_output=True, text=True, timeout=10)
-                
-                # notepad /p 命令通常会直接发送到默认打印机
-                print(f"✓ TXT文件已发送至打印机: {file_path.name}")
-                return True
-                
-            except subprocess.TimeoutExpired:
-                print(f"✓ TXT文件打印命令已执行: {file_path.name}")
-                return True
-            except Exception as e1:
-                print(f"notepad打印失败: {e1}")
-                
-                # 方法2: 使用系统默认程序打印
-                try:
-                    os.startfile(str(file_path), 'print')
-                    print(f"✓ 已使用默认程序打印: {file_path.name}")
-                    return True
-                except Exception as e2:
-                    print(f"默认程序打印失败: {e2}")
-                    
-                    # 方法3: 直接打开文件让用户手动打印
-                    try:
-                        os.startfile(str(file_path))
-                        print(f"✓ 已打开文件 {file_path.name} (请手动打印)")
-                        return True
-                    except Exception as e3:
-                        print(f"打开文件失败: {e3}")
-                        return False
-                        
-        except Exception as e:
-            print(f"TXT文件打印失败: {e}")
-            return False
-    
+                returncode, _detail = sumatra.run_detached(['notepad.exe', '/pt', str(file_path), printer], 120)
+            except subprocess.TimeoutExpired as e:
+                raise PrintJobError("记事本打印超时") from e
+            except OSError as e:
+                raise PrintJobError(f"无法启动记事本: {e}") from e
+            if returncode != 0:
+                raise PrintJobError(f"记事本打印失败（退出码 {returncode}）")
+        context.backend_used = "Notepad"
+        return True
+
     def get_file_info(self, file_path: Path) -> Dict[str, Any]:
-        """
-        获取文本文件信息
-        
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            文件信息字典
-        """
-        info = {
-            'file_path': str(file_path),
-            'file_name': file_path.name,
-            'file_size': file_path.stat().st_size,
-            'format': 'TXT',
-            'encoding': 'Unknown',
-            'lines': 0,
-            'pages': 0
-        }
-        
-        if self.can_handle_file(file_path):
-            try:
-                # 检测编码
-                content = self._read_txt_with_encoding(file_path)
-                info['lines'] = len(content.split('\n'))
-                info['pages'] = self._count_txt_pages(file_path)
-                
-                # 尝试检测编码类型
-                encodings = ['utf-8', 'gbk', 'gb2312']
-                for encoding in encodings:
-                    try:
-                        with open(file_path, 'r', encoding=encoding) as f:
-                            f.read(100)
-                        info['encoding'] = encoding.upper()
-                        break
-                    except (UnicodeDecodeError, UnicodeError):
-                        continue
-                        
-            except Exception as e:
-                print(f"获取文本文件详细信息失败 {file_path}: {e}")
-        
-        return info 
+        info: Dict[str, Any] = {'file_path': str(file_path), 'file_name': file_path.name,
+                                'file_size': file_path.stat().st_size, 'format': 'TXT',
+                                'encoding': 'Unknown', 'lines': 0, 'pages': 0}
+        try:
+            text, encoding = read_text_file(file_path)
+            info.update(encoding=encoding.upper(), lines=len(text.split('\n')),
+                        pages=self.count_pages(file_path))
+        except (OSError, ValueError):
+            pass
+        return info
