@@ -28,9 +28,33 @@ jobs:
           foreach ($p in 'Word.Application','Excel.Application','PowerPoint.Application') {
             "$p registered: $([bool](Get-Item "Registry::HKEY_CLASSES_ROOT\$p" -ErrorAction SilentlyContinue))"
           }
-      - name: Install WPS Office
+      - name: Install WPS Office (official installer, Authenticode verified)
         shell: pwsh
-        run: choco install wps-office-free -y --no-progress
+        timeout-minutes: 30
+        run: |
+          # chocolatey 的 wps-office-free 包校验和已过期，这里直接从 WPS 官方 CDN 下载，
+          # 并要求安装程序带有有效的金山（Kingsoft）Authenticode 签名后才执行
+          $url = "https://wdl1.pcfg.cache.wpscdn.com/wpsdl/wpsoffice/download/11.2.0.10223/WPSOffice_11.2.0.10223.exe"
+          $exe = "$env:RUNNER_TEMP\WPSOffice_setup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $sig = Get-AuthenticodeSignature $exe
+          "Signature: $($sig.Status) / $($sig.SignerCertificate.Subject)"
+          "SHA256: $((Get-FileHash $exe -Algorithm SHA256).Hash)"
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Kingsoft') { throw "WPS 安装程序签名无效" }
+          $p = Start-Process -FilePath $exe -ArgumentList '/S','-agreelicense' -PassThru
+          $deadline = (Get-Date).AddMinutes(25)
+          while ((Get-Date) -lt $deadline) {
+            $ok = @('KWPS.Application','KET.Application','KWPP.Application') | ForEach-Object {
+              [bool](Get-Item "Registry::HKEY_CLASSES_ROOT\$_" -ErrorAction SilentlyContinue) }
+            if (-not ($ok -contains $false)) { "WPS COM registered"; break }
+            Start-Sleep -Seconds 15
+          }
+          Get-Process | Where-Object { $_.Name -match 'wps|et|wpp|setup|install' } | Format-Table Id, Name, Path -AutoSize
+          foreach ($p in 'KWPS.Application','KET.Application','KWPP.Application') {
+            "$p registered: $([bool](Get-Item "Registry::HKEY_CLASSES_ROOT\$p" -ErrorAction SilentlyContinue))"
+          }
+          # 结束安装后自动启动的 WPS 界面进程，保证测试从干净状态开始
+          Get-Process -Name wps,et,wpp,wpscenter,wpscloudsvr -ErrorAction SilentlyContinue | Stop-Process -Force
       - name: Create file-port PDF test printer
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts\setup_test_pdf_printer.ps1 -OutputFile C:\bdp_test\out.pdf
