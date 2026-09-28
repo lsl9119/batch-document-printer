@@ -113,6 +113,20 @@ BatchDocumentPrinter-WPS\
 - 打印机驱动不支持的设置（例如黑白打印机选了彩色、不支持双面）不会导致失败，
   日志与完成提示中会记录：`当前打印机驱动不支持该设置，已使用驱动默认值`
 
+### WPS 与 Microsoft Office 兼容
+
+同一个程序同时支持 WPS Office 和 Microsoft Office，按组件（文字 / 表格 / 演示）分别选择引擎：
+
+| 电脑上安装了 | “自动”模式（默认）实际使用 |
+|--------------|---------------------------|
+| 只有 WPS Office | WPS 文字 / WPS 表格 / WPS 演示 |
+| 只有 Microsoft Office | Word / Excel / PowerPoint |
+| 两者都有 | 优先 WPS；可在“打印设置 → Office 引擎”改为“仅 Microsoft Office” |
+| WPS 某个组件 COM 异常（如表格） | 该组件自动改用 Microsoft Office（若已安装），其余仍用 WPS |
+| 都没有 | Office 文档打印失败并提示安装；PDF / 图片 / 文本照常打印 |
+
+两种引擎使用同一套打印流程（参数、超时保护、进程清理、默认打印机恢复）。
+
 ### 默认打印机保护
 
 WPS 演示的 `PrintOptions.ActivePrinter` 在部分版本中是只读的，因此需要临时切换系统默认打印机：

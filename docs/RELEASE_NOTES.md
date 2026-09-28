@@ -22,6 +22,11 @@ Windows + WPS Office 批量打印工具。只安装 WPS Office、不安装 Micro
 - Microsoft Office 非必需
 - PDF、图片、文本打印不需要 WPS/Office
 
+## WPS 与 Microsoft Office 兼容
+
+同时兼容：默认“自动”模式下每个组件优先使用 WPS，WPS 不可用时使用 Microsoft Office；
+只装 Office 的电脑也能直接使用。可在“打印设置 → Office 引擎”中限定“仅 WPS”或“仅 Microsoft Office”。
+
 ## 支持的格式
 
 | 类型 | 扩展名 | 引擎 |
