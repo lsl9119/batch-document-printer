@@ -20,9 +20,8 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
+      # 手动触发时构建触发分支（main）的当前提交，并由 action-gh-release 在该提交上创建 tag
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -31,6 +30,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           name: Batch Document Printer – WPS Edition ${{ github.event.inputs.tag || github.ref_name }}
           body_path: docs/RELEASE_NOTES.md
           files: |
