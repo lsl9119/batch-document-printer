@@ -199,4 +199,6 @@ def test_snapshot_tolerates_oserror_from_psutil(monkeypatch):
 
     monkeypatch.setattr(process_utils, "psutil", FakePsutil)
     monkeypatch.setattr(process_utils, "PSUTIL_AVAILABLE", True)
+    assert process_utils._psutil_processes() == [(2, "WPS.EXE"), (3, "et.exe"), (4, "explorer.exe")]
+    monkeypatch.setattr(process_utils, "list_processes", process_utils._psutil_processes)
     assert process_utils.snapshot({"wps.exe", "et.exe"}) == {2: "wps.exe", 3: "et.exe"}
