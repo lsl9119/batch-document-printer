@@ -1,18 +1,24 @@
-name: WPS real-environment E2E (Windows runner)
+name: Real Windows print E2E
 
-# 在 GitHub 的 Windows runner 上安装 WPS Office（国际版，chocolatey 包 wps-office-free），
-# 执行真实的 COM 冒烟测试和打印到"文件端口虚拟 PDF 打印机"的端到端测试。
-# 注意：runner 是 Windows Server，且 WPS 首次启动可能弹出协议/登录窗口，因此该工作流
-# 结果仅作参考；正式验收仍以 Windows 10/11 桌面 + WPS 的人工验证为准。
+# 在 GitHub Windows runner（Windows Server，无 Microsoft Office）上用真实 Windows 打印子系统验证：
+#   1. 打包产物的诊断工具
+#   2. PDF / 图片 / TXT 真实打印到“文件端口虚拟 PDF 打印机”，检查输出 PDF 与默认打印机恢复
+#   3. （可选）若能安装 WPS，则运行 WPS COM 冒烟测试与 Office 文档打印
+# 说明：WPS 官方安装程序为联网安装器，在 runner 上无法无人值守完成安装，因此 WPS 部分默认跳过。
 on:
   workflow_dispatch:
+    inputs:
+      try_wps:
+        description: "Try to install WPS Office (online installer, usually fails on runners)"
+        type: boolean
+        default: false
 
 env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: "utf-8"
 
 jobs:
-  wps-e2e:
+  real-print:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -25,23 +31,47 @@ jobs:
         shell: pwsh
         run: |
           Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version | Format-List
-          foreach ($p in 'Word.Application','Excel.Application','PowerPoint.Application') {
+          Get-Printer | Format-Table Name, DriverName, PortName -AutoSize
+          foreach ($p in 'Word.Application','Excel.Application','PowerPoint.Application','KWPS.Application','KET.Application','KWPP.Application') {
             "$p registered: $([bool](Get-Item "Registry::HKEY_CLASSES_ROOT\$p" -ErrorAction SilentlyContinue))"
           }
-      - name: Install WPS Office
+      - name: Install WPS Office (optional, official installer, Authenticode verified)
+        if: ${{ inputs.try_wps }}
+        continue-on-error: true
         shell: pwsh
-        run: choco install wps-office-free -y --no-progress
+        timeout-minutes: 30
+        run: |
+          $url = "https://wdl1.pcfg.cache.wpscdn.com/wpsdl/wpsoffice/download/11.2.0.10223/WPSOffice_11.2.0.10223.exe"
+          $exe = "$env:RUNNER_TEMP\WPSOffice_setup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $sig = Get-AuthenticodeSignature $exe
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Kingsoft') { throw "invalid WPS installer signature" }
+          Start-Process -FilePath $exe -ArgumentList '/S','-agreelicense' | Out-Null
+          $deadline = (Get-Date).AddMinutes(25)
+          while ((Get-Date) -lt $deadline) {
+            if (Get-Item "Registry::HKEY_CLASSES_ROOT\KWPS.Application" -ErrorAction SilentlyContinue) { "WPS COM registered"; break }
+            Start-Sleep -Seconds 15
+          }
       - name: Create file-port PDF test printer
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts\setup_test_pdf_printer.ps1 -OutputFile C:\bdp_test\out.pdf
-      - name: WPS COM smoke test
-        run: python scripts/test_wps_com.py --timeout 180 --json wps_com.json
-      - name: Real print E2E
-        run: python scripts/e2e_real_print.py --printer "BDP Test PDF" --port-file C:\bdp_test\out.pdf --native --out-dir e2e_output
+      - name: Build and run frozen diagnostic tool
+        shell: pwsh
+        run: |
+          python build_exe.py --skip-tests
+          & dist\BatchDocumentPrinter-WPS\BDP-WPS-Diagnose.exe --timeout 120 --json wps_com.json
+          "diagnose exit code: $LASTEXITCODE"
+          exit 0
+      - name: Real print E2E (PDF / images / TXT; Office files expected to fail without WPS)
+        shell: pwsh
+        run: |
+          $wps = [bool](Get-Item "Registry::HKEY_CLASSES_ROOT\KWPS.Application" -ErrorAction SilentlyContinue)
+          if ($wps) { python scripts/e2e_real_print.py --printer "BDP Test PDF" --port-file C:\bdp_test\out.pdf --native --out-dir e2e_output }
+          else { python scripts/e2e_real_print.py --printer "BDP Test PDF" --port-file C:\bdp_test\out.pdf --skip-office --out-dir e2e_output }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: wps-e2e-report
+          name: real-print-e2e-report
           path: |
             wps_com.json
             e2e_output/

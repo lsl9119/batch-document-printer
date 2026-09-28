@@ -6,7 +6,27 @@
 - **A. 自动化测试（mock）**：pytest，替换 COM、win32print、SumatraPDF 子进程、进程表
 - **B. Wine 环境真实代码验证**：Windows 版 CPython 3.11 + 真实 pywin32 / psutil / PyInstaller 产物运行在 Wine 9.0 中，
   打印机为 CUPS-PDF 虚拟打印机。这验证的是本程序代码与 Windows API 的交互，**不是** Windows 10/11 真机，也**不是** WPS
-- **C. 真实 Windows + WPS 验证**：**尚未进行**
+- **C. 真实 Windows（GitHub Actions windows-latest = Windows Server 2025，无 Office/WPS）**：
+  PyInstaller 构建、单元测试、打包产物诊断工具、PDF/图片/TXT 经 Windows 打印后台打印到文件端口 PDF 打印机
+- **D. 真实 Windows + WPS 验证**：**尚未进行**（WPS 官方安装程序为联网安装器，无法在 CI 中无人值守安装）
+
+## C. 真实 Windows 验证（GitHub Actions）
+
+- CI（`ci.yml`）：Windows 与 Linux 上 111 项测试通过；Windows 上 PyInstaller 构建成功，打包后的 `BDP-WPS-Diagnose.exe` 正常运行
+- 真实打印（`wps-e2e.yml`，run 36374359383，Microsoft Print To PDF 驱动 + 本地文件端口）：
+
+| 文件 | 引擎 | 结果 |
+|------|------|------|
+| sample.pdf | SumatraPDF | 成功，输出 2 页 |
+| sample.png / .jpg / .bmp | SumatraPDF | 成功，各 1 页 |
+| sample.tiff（2 帧） | SumatraPDF | 成功，输出 2 页 |
+| sample.txt | Windows GDI | 成功，输出 2 页 |
+| docx / xlsx / pptx / 损坏的 docx | — | 按预期失败：“未找到可用的 Office 组件”，并列出 KWPS/KET/KWPP 与 Word/Excel/PowerPoint 的 ProgID |
+
+  批次“成功 6，失败 4”，失败项全部符合预期；队列未中断；无残留进程；E2E RESULT: PASS。
+  （runner 没有默认打印机，因此该次运行未涉及默认打印机切换；切换与恢复由 mock 测试和 Wine 验证覆盖。）
+- 修复了在真实 Windows 上才暴露的问题：`setup_test_pdf_printer.ps1` 在 Windows PowerShell 5.1 中因编码无法解析；
+  `build_exe.py` 在 cp1252 控制台输出中文时崩溃
 
 ## A. 自动化测试
 
@@ -52,7 +72,7 @@ Wine 验证中发现并已修复的真实问题：
 Wine 的局限（不代表 Windows 行为）：强制结束进程外 COM 服务器后 Wine 无法再次创建该服务器（Windows 的 SCM 会清理）；
 Wine PostScript 驱动不能嵌入 OpenType(CFF) 字体；CUPS-PDF 忽略份数与色彩；Wine 不支持以 NULL 清除每用户 DEVMODE。
 
-## C. 未验证项（需要在 Windows 10/11 + WPS 上完成）
+## D. 未验证项（需要在 Windows 10/11 + WPS 上完成）
 
 - KWPS / KET / KWPP 的 COM 冒烟测试（`BDP-WPS-Diagnose.exe`）
 - DOCX / XLSX / PPTX 以及原生 WPS / ET / DPS 通过 WPS 打印（`scripts/e2e_real_print.py --native`）

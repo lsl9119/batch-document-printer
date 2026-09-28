@@ -104,6 +104,8 @@ def main() -> int:
     parser.add_argument("--samples", type=Path, default=ROOT / "tests" / "samples")
     parser.add_argument("--out-dir", type=Path, default=ROOT / "e2e_output")
     parser.add_argument("--native", action="store_true", help="用 WPS 生成 .wps/.et/.dps 并一起打印")
+    parser.add_argument("--skip-office", action="store_true",
+                        help="没有 WPS/Office 时只验证 PDF/图片/文本（Office 文件仍会加入并应报告失败）")
     parser.add_argument("--copies", type=int, default=1)
     parser.add_argument("--allow-physical-printer", action="store_true")
     parser.add_argument("--wait", type=float, default=120, help="每个作业等待输出文件的秒数")
@@ -222,8 +224,10 @@ def main() -> int:
     print(f"残留 WPS 进程: {leftovers or '无'}")
 
     ok = report["default_printer_restored"] and not leftovers
+    office_exts = (".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt", ".wps", ".et", ".dps")
     for entry in results.values():
-        expected_fail = entry["file"] == corrupt.name
+        expected_fail = entry["file"] == corrupt.name or (
+            args.skip_office and entry["file"].lower().endswith(office_exts))
         if expected_fail:
             ok = ok and entry["status"] == "error"
         else:
