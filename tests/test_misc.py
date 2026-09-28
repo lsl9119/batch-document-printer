@@ -202,3 +202,32 @@ def test_snapshot_tolerates_oserror_from_psutil(monkeypatch):
     assert process_utils._psutil_processes() == [(2, "WPS.EXE"), (3, "et.exe"), (4, "explorer.exe")]
     monkeypatch.setattr(process_utils, "list_processes", process_utils._psutil_processes)
     assert process_utils.snapshot({"wps.exe", "et.exe"}) == {2: "wps.exe", 3: "et.exe"}
+
+
+# ---------------- 日志重定向不能死锁 ----------------
+def test_stream_to_logger_reentrancy_does_not_deadlock():
+    import logging
+    import threading
+    from src.utils.logging_setup import StreamToLogger
+
+    logger = logging.getLogger("bdp.test.reentrant")
+    logger.propagate = False
+    stream_holder = {}
+
+    class FailingHandler(logging.Handler):
+        def emit(self, record):
+            # 模拟文件处理器失败后 logging 把错误写到 sys.stderr（即 StreamToLogger 自身）
+            stream_holder["stream"].write("handler error\n")
+
+    logger.addHandler(FailingHandler())
+    stream = StreamToLogger(logger, logging.ERROR)
+    stream_holder["stream"] = stream
+    done = threading.Event()
+
+    def worker():
+        stream.write("first line\n")
+        done.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    assert done.wait(3), "StreamToLogger 在重入时死锁"

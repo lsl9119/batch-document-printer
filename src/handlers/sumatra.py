@@ -9,8 +9,9 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from ..core.models import Orientation, PrintSettings
 from ..core.print_context import PrintJobError
@@ -23,6 +24,21 @@ SUMATRA_PAPERS = {"a2": "A2", "a3": "A3", "a4": "A4", "a5": "A5", "a6": "A6",
                   "letter": "letter", "legal": "legal", "tabloid": "tabloid", "statement": "statement"}
 
 CREATE_NO_WINDOW = 0x08000000
+
+# 正在运行的外部打印进程（用于取消/看门狗强制结束）
+_active: Set[subprocess.Popen] = set()
+_active_lock = threading.Lock()
+
+
+class ExternalPrintTimeout(PrintJobError):
+    """外部打印程序超时：作业可能已部分进入打印队列，不应自动换用其他方式重打"""
+
+
+def kill_active(reason: str = "") -> None:
+    with _active_lock:
+        procs = list(_active)
+    for proc in procs:
+        _kill_tree(proc, reason or "强制结束")
 
 
 def sumatra_path() -> Path:
@@ -74,7 +90,8 @@ def run_print(file_path: Path, printer_name: str, settings: PrintSettings, log=N
     try:
         returncode, detail = run_detached(cmd, timeout)
     except subprocess.TimeoutExpired as e:
-        raise PrintJobError(f"SumatraPDF 打印超时（{timeout} 秒），已结束 SumatraPDF 进程") from e
+        raise ExternalPrintTimeout(f"SumatraPDF 打印超时（{timeout} 秒），已结束 SumatraPDF 进程。"
+                                   f"作业可能已部分发送，请检查打印机队列后再决定是否重打") from e
     except OSError as e:
         raise PrintJobError(f"无法启动 SumatraPDF: {e}") from e
     if returncode != 0:
@@ -98,24 +115,29 @@ def run_detached(cmd: List[str], timeout: float):
         kwargs["creationflags"] = CREATE_NO_WINDOW
     with tempfile.TemporaryFile() as err:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, **kwargs)
+        with _active_lock:
+            _active.add(proc)
         try:
             returncode = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _kill_tree(proc)
+            _kill_tree(proc, "外部打印程序超时")
             raise
+        finally:
+            with _active_lock:
+                _active.discard(proc)
         err.seek(0)
         detail = err.read().decode("utf-8", errors="replace").strip()
     return returncode, detail
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
+def _kill_tree(proc: subprocess.Popen, reason: str) -> None:
     from ..backends import process_utils
     try:
         import psutil  # type: ignore
         children = [c.pid for c in psutil.Process(proc.pid).children(recursive=True)]
     except Exception:  # noqa: BLE001 - 取不到子进程时只结束主进程
         children = []
-    process_utils.kill_pids(children + [proc.pid], reason="外部打印程序超时")
+    process_utils.kill_pids(children + [proc.pid], reason=reason)
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:

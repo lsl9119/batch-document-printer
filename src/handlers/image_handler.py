@@ -77,6 +77,8 @@ class ImageDocumentHandler(BaseDocumentHandler):
                 context.backend_used = "SumatraPDF"
                 context.notes.append(f"print-settings={used}")
                 return True
+            except sumatra.ExternalPrintTimeout:
+                raise  # 作业可能已部分发送，不自动重打，避免重复打印
             except PrintJobError as e:
                 sumatra_error = e
                 context.log(f"SumatraPDF 打印图片失败，改用 GDI 备用方案: {e}")

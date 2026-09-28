@@ -380,12 +380,103 @@ class PrinterEnvironmentBusy(RuntimeError):
     """另一个批次/实例正在修改打印机环境"""
 
 
-def _pid_alive(pid: int) -> bool:
+# ---------------------------------------------------------------------------
+# "让 Windows 管理默认打印机"（LegacyDefaultPrinterMode）
+# ---------------------------------------------------------------------------
+_WINDOWS_KEY = r"Software\Microsoft\Windows NT\CurrentVersion\Windows"
+_LEGACY_VALUE = "LegacyDefaultPrinterMode"
+_MISSING = "__missing__"
+
+
+def get_legacy_default_mode():
+    """返回 LegacyDefaultPrinterMode 的值；不存在返回 _MISSING；无法读取返回 None"""
+    try:
+        import winreg  # type: ignore
+    except ImportError:
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _WINDOWS_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, _LEGACY_VALUE)
+            return int(value)
+    except FileNotFoundError:
+        return _MISSING
+    except OSError:
+        return None
+
+
+def set_legacy_default_mode(value) -> bool:
+    """恢复 LegacyDefaultPrinterMode（_MISSING 表示删除该值）"""
+    if value is None:
+        return True
+    try:
+        import winreg  # type: ignore
+    except ImportError:
+        return True
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _WINDOWS_KEY, 0,
+                            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as key:
+            if value == _MISSING:
+                try:
+                    winreg.DeleteValue(key, _LEGACY_VALUE)
+                except FileNotFoundError:
+                    pass
+            else:
+                winreg.SetValueEx(key, _LEGACY_VALUE, 0, winreg.REG_DWORD, int(value))
+        return True
+    except OSError as e:
+        logger.warning("恢复“让 Windows 管理默认打印机”设置失败: %s", e)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 进程身份（防止 PID 被复用后误判“另一个实例正在打印”）
+# ---------------------------------------------------------------------------
+def _process_create_time(pid: int) -> Optional[float]:
     try:
         import psutil  # type: ignore
-        return psutil.pid_exists(pid)
+        return float(psutil.Process(pid).create_time())
+    except Exception:  # noqa: BLE001 - 进程不存在或无法读取
+        return None
+
+
+def _pid_alive(pid: int, create_time: Optional[float] = None) -> bool:
+    try:
+        import psutil  # type: ignore
     except ImportError:
         return False
+    try:
+        if not psutil.pid_exists(pid):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    if create_time is None:
+        return True
+    actual = _process_create_time(pid)
+    return actual is None or abs(actual - create_time) < 2.0
+
+
+def _state_owner_alive(state: dict) -> bool:
+    pid = int(state.get("pid") or 0)
+    if not pid or pid == os.getpid():
+        return False
+    return _pid_alive(pid, state.get("pid_create_time"))
+
+
+def _load_state(state_file: Path) -> Optional[dict]:
+    try:
+        return json.loads(state_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {}
+
+
+def _state_devmodes(state: dict) -> List[dict]:
+    """兼容旧格式（单个 devmode）与新格式（devmodes 列表）"""
+    entries = list(state.get("devmodes") or [])
+    if state.get("devmode"):
+        entries.append(state["devmode"])
+    return [e for e in entries if e and e.get("printer")]
 
 
 class PrinterEnvironment:
@@ -405,46 +496,57 @@ class PrinterEnvironment:
         self.state_file = state_file or _state_file_default()
         self._log = log or (lambda m: logger.info(m))
         self.original_default: Optional[str] = None
+        self.legacy_mode = None
         self.default_switched = False
         self.devmode_guard: Optional[DevModeGuard] = None
         self.warnings: List[str] = []
         self.capabilities: Optional[PrinterCapabilities] = None
+        # 上次异常退出且未能恢复的状态：继承下来，保证最终恢复到“真正的原始状态”
+        self._inherited: Optional[dict] = None
+        self._inherited_devmodes: List[dict] = []
+        self._owns_state_file = False
         self._restored = False
         self._lock_acquired = False
 
     # ---- 状态文件 ----
+    def _devmode_entries(self) -> List[dict]:
+        entries = list(self._inherited_devmodes)
+        guard = self.devmode_guard
+        if guard is not None and guard.had_user_devmode is not None:
+            entries.append({"printer": self.printer_name, "had_user_devmode": guard.had_user_devmode,
+                            "original": guard.original})
+        return entries
+
     def _write_state(self) -> None:
         state = {
             "pid": os.getpid(),
+            "pid_create_time": _process_create_time(os.getpid()),
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "target_printer": self.printer_name,
             "original_default": self.original_default,
             "default_switched": self.default_switched,
-            "devmode": None,
+            "legacy_default_mode": self.legacy_mode,
+            "devmodes": self._devmode_entries(),
         }
-        if self.devmode_guard is not None and self.devmode_guard.had_user_devmode is not None:
-            state["devmode"] = {
-                "printer": self.printer_name,
-                "had_user_devmode": self.devmode_guard.had_user_devmode,
-                "original": self.devmode_guard.original,
-            }
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.state_file)
+        self._owns_state_file = True
 
     def _check_foreign_state(self) -> None:
-        if not self.state_file.exists():
+        state = _load_state(self.state_file)
+        if state is None:
             return
-        try:
-            state = json.loads(self.state_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            state = {}
-        pid = int(state.get("pid") or 0)
-        if pid and pid != os.getpid() and _pid_alive(pid):
+        if _state_owner_alive(state):
             raise PrinterEnvironmentBusy("另一个批量打印程序实例正在打印，请等待其完成后再试")
-        # 残留的旧状态（上次异常退出）：先恢复
+        # 残留的旧状态（上次异常退出）：先尝试恢复
         recover_pending_state(self.state_file, self._log)
+        remaining = _load_state(self.state_file)
+        if remaining:
+            # 恢复失败：继承旧状态，绝不能用当前（仍被修改的）状态覆盖“原始状态”
+            self._log("⚠️ 上次遗留的打印机状态未能完全恢复，本次结束时将一并恢复")
+            self._inherited = remaining
 
     # ---- 进入/退出 ----
     def __enter__(self):
@@ -454,16 +556,32 @@ class PrinterEnvironment:
         self._lock_acquired = True
         try:
             self._check_foreign_state()
-            self.original_default = get_default_printer()
+            inherited = self._inherited or {}
+            if inherited.get("default_switched") and inherited.get("original_default"):
+                self.original_default = inherited["original_default"]
+                self.default_switched = True  # 结束时需要恢复到继承的原默认打印机
+                self.legacy_mode = inherited.get("legacy_default_mode")
+            else:
+                self.original_default = get_default_printer()
+            stale_devmodes = _state_devmodes(inherited)
+            same_printer = [e for e in stale_devmodes if e["printer"] == self.printer_name]
+            self._inherited_devmodes = [e for e in stale_devmodes if e["printer"] != self.printer_name]
+
             if self.apply_devmode:
                 self.capabilities = get_capabilities(self.printer_name)
                 self.devmode_guard = DevModeGuard(self.printer_name, self._log)
-                try:
-                    self.devmode_guard.backup()
-                except Exception as e:  # noqa: BLE001
-                    self._log(f"备份打印机参数失败，跳过参数设置: {e}")
-                    self.devmode_guard = None
-            # 先落盘"原始状态"，再做任何修改
+                if same_printer:
+                    # 该打印机的参数上次未恢复：以上次备份的原始值为准
+                    self.devmode_guard.had_user_devmode = bool(same_printer[0].get("had_user_devmode"))
+                    self.devmode_guard.original = same_printer[0].get("original") or {}
+                    self.devmode_guard.applied = True
+                else:
+                    try:
+                        self.devmode_guard.backup()
+                    except Exception as e:  # noqa: BLE001
+                        self._log(f"备份打印机参数失败，跳过参数设置: {e}")
+                        self.devmode_guard = None
+            # 先落盘“原始状态”，再做任何修改
             self._write_state()
             _active_environment = self
 
@@ -471,7 +589,9 @@ class PrinterEnvironment:
                 self.warnings.extend(self.devmode_guard.apply(self.settings, self.capabilities))
 
             if self.switch_default and self.printer_name and \
-                    (self.original_default or "").lower() != self.printer_name.lower():
+                    (get_default_printer() or "").lower() != self.printer_name.lower():
+                if not self.default_switched:
+                    self.legacy_mode = get_legacy_default_mode()
                 self.default_switched = True
                 self._write_state()
                 if set_default_printer(self.printer_name):
@@ -498,14 +618,22 @@ class PrinterEnvironment:
         ok = True
         try:
             if self.default_switched and self.original_default:
-                if set_default_printer(self.original_default):
-                    self._log(f"已恢复系统默认打印机: {self.original_default}")
-                else:
-                    ok = False
-                    self._log(f"❌ 恢复默认打印机失败: {self.original_default}（下次启动时将重试）")
+                current = get_default_printer() or ""
+                if current.lower() != self.original_default.lower():
+                    if set_default_printer(self.original_default):
+                        self._log(f"已恢复系统默认打印机: {self.original_default}")
+                    elif not _printer_exists(self.original_default):
+                        self._log(f"原默认打印机 {self.original_default} 已不存在，无法恢复")
+                    else:
+                        ok = False
+                        self._log(f"❌ 恢复默认打印机失败: {self.original_default}（下次启动时将重试）")
+                set_legacy_default_mode(self.legacy_mode)
             if self.devmode_guard is not None:
                 ok = self.devmode_guard.restore() and ok
-            if ok:
+            for entry in self._inherited_devmodes:
+                ok = restore_devmode(entry["printer"], bool(entry.get("had_user_devmode")),
+                                     entry.get("original") or {}, self._log) and ok
+            if ok and (self._owns_state_file or self._inherited):
                 try:
                     self.state_file.unlink()
                 except FileNotFoundError:
@@ -522,9 +650,19 @@ class PrinterEnvironment:
                 _ENV_LOCK.release()
 
 
+def _printer_exists(name: str) -> bool:
+    try:
+        wp = _win32print()
+        flags = wp.PRINTER_ENUM_LOCAL | wp.PRINTER_ENUM_CONNECTIONS
+        return any(p[2].lower() == name.lower() for p in wp.EnumPrinters(flags))
+    except Exception:  # noqa: BLE001 - 无法枚举时按存在处理（保守：保留状态文件）
+        return True
+
+
 def recover_pending_state(state_file: Optional[Path] = None, log: Optional[LogFunc] = None) -> List[str]:
     """
     启动时调用：若上次运行异常退出导致默认打印机/打印参数未恢复，则在此恢复。
+    恢复失败时保留状态文件，下次继续尝试。
 
     Returns:
         执行的恢复操作说明列表
@@ -532,20 +670,18 @@ def recover_pending_state(state_file: Optional[Path] = None, log: Optional[LogFu
     state_file = state_file or _state_file_default()
     log = log or (lambda m: logger.info(m))
     actions: List[str] = []
-    if not state_file.exists():
+    state = _load_state(state_file)
+    if state is None:
         return actions
-    try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        log(f"恢复状态文件损坏，已忽略: {e}")
+    if state == {}:
+        log("恢复状态文件损坏，已忽略")
         try:
             state_file.unlink()
         except OSError:
             pass
         return actions
-    pid = int(state.get("pid") or 0)
-    if pid and pid != os.getpid() and _pid_alive(pid):
-        log(f"另一个实例 (pid={pid}) 正在打印，暂不恢复打印机状态")
+    if _state_owner_alive(state):
+        log(f"另一个实例 (pid={state.get('pid')}) 正在打印，暂不恢复打印机状态")
         return actions
 
     ok = True
@@ -555,15 +691,17 @@ def recover_pending_state(state_file: Optional[Path] = None, log: Optional[LogFu
         if (current or "").lower() != original.lower():
             if set_default_printer(original):
                 actions.append(f"已恢复上次异常退出前的默认打印机: {original}")
+            elif not _printer_exists(original):
+                actions.append(f"上次的原默认打印机 {original} 已不存在，无法恢复")
             else:
                 ok = False
                 actions.append(f"恢复默认打印机失败: {original}")
-    devmode_state = state.get("devmode")
-    if devmode_state and devmode_state.get("printer"):
-        if restore_devmode(devmode_state["printer"], bool(devmode_state.get("had_user_devmode")),
-                           devmode_state.get("original") or {}, log):
-            actions.append(f"已恢复打印机参数: {devmode_state['printer']}")
-        else:
+        set_legacy_default_mode(state.get("legacy_default_mode"))
+    for entry in _state_devmodes(state):
+        if restore_devmode(entry["printer"], bool(entry.get("had_user_devmode")),
+                           entry.get("original") or {}, log):
+            actions.append(f"已恢复打印机参数: {entry['printer']}")
+        elif _printer_exists(entry["printer"]):
             ok = False
     if ok:
         try:

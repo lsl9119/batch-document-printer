@@ -2,6 +2,7 @@
 环境诊断与关于对话框
 """
 import os
+import queue
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -51,24 +52,32 @@ def show_environment_dialog(parent, report: EnvironmentReport, preference: str =
         deep_btn.config(state="disabled")
         _set_text(text, "正在启动 WPS 文字 / WPS 表格 / WPS 演示 进行实际 COM 测试，请稍候（约 10~60 秒）...\n"
                         "测试会创建隐藏的 WPS 进程并立即退出，不会打印任何内容。")
+        results: "queue.Queue" = queue.Queue()
 
         def worker():
             try:
                 new_report = collect_environment(preference, deep=True)
-                content = new_report.text()
-            except Exception as e:  # noqa: BLE001 - 诊断失败也要展示给用户
-                new_report, content = None, f"深度检测失败: {e}"
+                results.put((new_report, new_report.text()))
+            except Exception as e:  # noqa: BLE001 - 诊断失败也要展示给用户（包括“正在打印”）
+                results.put((None, f"深度检测未执行/失败: {e}"))
 
-            def done():
-                if not window.winfo_exists():
-                    return
-                _set_text(text, content)
-                deep_btn.config(state="normal")
-                if new_report is not None and on_updated:
-                    on_updated(new_report)
-            parent.after(0, done)
+        def poll():
+            # 只在主线程中操作 Tkinter 控件
+            try:
+                new_report, content = results.get_nowait()
+            except queue.Empty:
+                parent.after(200, poll)
+                return
+            if not window.winfo_exists():
+                return
+            _set_text(text, content)
+            deep_btn.config(state="normal")
+            if new_report is not None and on_updated:
+                on_updated(new_report)
 
-        threading.Thread(target=worker, name="DeepEnvCheck", daemon=True).start()
+        # 非守护线程：程序退出时会等待检测结束，确保测试启动的 WPS 进程被正确退出
+        threading.Thread(target=worker, name="DeepEnvCheck", daemon=False).start()
+        parent.after(200, poll)
 
     def copy_report():
         window.clipboard_clear()

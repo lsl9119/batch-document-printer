@@ -24,7 +24,14 @@ _print_log_lock = threading.Lock()
 
 
 class StreamToLogger:
-    """把写入 stdout/stderr 的内容转发给 logger，同时保留原始流（如果存在）"""
+    """
+    把写入 stdout/stderr 的内容转发给 logger，同时保留原始流（如果存在）。
+
+    注意重入：日志处理器写文件失败时，logging 会把错误信息写到 sys.stderr（也就是本对象）。
+    若此时仍持有锁或再次调用 logger，就会死锁/递归。因此：
+    - 只在锁内拼接缓冲区，调用 logger 放在锁外
+    - 同一线程重入时只写原始流，不再转发给 logger
+    """
 
     def __init__(self, logger: logging.Logger, level: int, original=None):
         self._logger = logger
@@ -32,29 +39,42 @@ class StreamToLogger:
         self._original = original
         self._buffer = ""
         self._lock = threading.Lock()
+        self._local = threading.local()
+
+    def _write_original(self, message) -> None:
+        if self._original is not None:
+            try:
+                self._original.write(message)
+            except Exception:  # noqa: BLE001 - 原始控制台不可用（例如编码问题）时忽略
+                pass
 
     def write(self, message):
         if not message:
             return 0
-        if self._original is not None:
-            try:
-                self._original.write(message)
-            except Exception:  # 原始控制台不可用（例如编码问题）时忽略
-                pass
+        self._write_original(message)
+        if getattr(self._local, "active", False):
+            return len(message)
         with self._lock:
             self._buffer += message
+            lines = []
             while "\n" in self._buffer:
                 line, self._buffer = self._buffer.split("\n", 1)
-                line = line.rstrip()
-                if line:
+                if line.rstrip():
+                    lines.append(line.rstrip())
+        if lines:
+            self._local.active = True
+            try:
+                for line in lines:
                     self._logger.log(self._level, line)
+            finally:
+                self._local.active = False
         return len(message)
 
     def flush(self):
         if self._original is not None:
             try:
                 self._original.flush()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
     def isatty(self):
@@ -78,6 +98,8 @@ def setup_logging(level: int = logging.INFO, redirect_std: bool = True,
     if _configured:
         return logs_dir
 
+    # 日志写入失败（磁盘满、文件被占用）时不向 stderr 打印回溯，避免与 stderr 重定向相互递归
+    logging.raiseExceptions = False
     logger = logging.getLogger(APP_LOGGER_NAME)
     logger.setLevel(level)
     logger.propagate = False

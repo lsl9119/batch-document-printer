@@ -37,6 +37,18 @@ def fake_win32print(monkeypatch):
         return True
 
     monkeypatch.setattr(printer_environment, "clear_user_devmode_native", clear_native)
+    # “让 Windows 管理默认打印机”注册表值：用替身，测试绝不修改真实 HKCU
+    fake.legacy_mode = printer_environment._MISSING
+    fake.legacy_writes = []
+    monkeypatch.setattr(printer_environment, "get_legacy_default_mode", lambda: fake.legacy_mode)
+
+    def set_legacy(value):
+        fake.legacy_writes.append(value)
+        if value is not None:
+            fake.legacy_mode = value
+        return True
+
+    monkeypatch.setattr(printer_environment, "set_legacy_default_mode", set_legacy)
     monkeypatch.setattr(printer_environment.time, "sleep", lambda s: None)
     return fake
 

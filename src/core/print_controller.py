@@ -18,8 +18,11 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from ..backends.com_utils import describe_com_error
-from ..backends.office_backend import (KIND_BY_FILE_TYPE, OfficeKind, OfficeSessionPool, Watchdog,
-                                       com_initialized, detect_backend)
+from contextlib import nullcontext
+
+from ..backends.office_backend import (KIND_BY_FILE_TYPE, OfficeBusyError, OfficeKind, OfficeSessionPool,
+                                       Watchdog, com_initialized, detect_backend, office_automation)
+from ..handlers import sumatra
 from ..handlers import create_default_registry
 from ..utils.logging_setup import append_print_log, get_print_log_path
 from .models import OFFICE_FILE_TYPES, Document, FileType, PrintSettings, PrintStatus
@@ -32,7 +35,7 @@ DEFAULT_TIMEOUTS = {
     OfficeKind.WRITER: 180,
     OfficeKind.SPREADSHEET: 300,
     OfficeKind.PRESENTATION: 300,
-    None: 600,   # PDF/图片/文本（SumatraPDF 自身也有超时）
+    None: 960,   # PDF/图片/文本：必须大于 SumatraPDF 自身的最大超时（900 秒）
 }
 
 
@@ -187,9 +190,11 @@ class PrintController:
         self._cancel_event.set()
         logger.info("请求取消打印（force=%s）", force)
         pool = self._active_pool
-        if force and pool is not None:
-            for kind in OfficeKind:
-                pool.kill_kind(kind, "用户取消/退出程序")
+        if force:
+            if pool is not None:
+                for kind in OfficeKind:
+                    pool.kill_kind(kind, "用户取消/退出程序")
+            sumatra.kill_active("用户取消/退出程序")
 
     def _log(self, message: str) -> None:
         logger.info(message)
@@ -229,7 +234,9 @@ class PrintController:
             append_print_log(header, self._logs_dir)
             logger.info(header)
 
-            with com_initialized():
+            office_lock = (office_automation(150, "页数统计或环境深度检测正在使用 WPS，请稍后再打印")
+                           if has_office else nullcontext())
+            with com_initialized(), office_lock:
                 pool = None
                 switch_default = False
                 if has_office:
@@ -255,7 +262,7 @@ class PrintController:
                                 pool.close_all()
                 finally:
                     self._active_pool = None
-        except PrinterEnvironmentBusy as e:
+        except (PrinterEnvironmentBusy, OfficeBusyError) as e:
             summary.fatal_error = str(e)
         except Exception as e:  # noqa: BLE001 - 批次级异常：记录并结束，不让线程崩溃
             logger.exception("批量打印发生异常")
@@ -341,6 +348,8 @@ class PrintController:
         def _on_timeout():
             if kind is not None and pool is not None:
                 pool.kill_kind(kind, f"打印超时（>{timeout}s）")
+            elif kind is None:
+                sumatra.kill_active("打印超时")
 
         watchdog = Watchdog(timeout, _on_timeout, name=document.file_name)
         try:

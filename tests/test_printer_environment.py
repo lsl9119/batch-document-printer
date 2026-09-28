@@ -98,7 +98,7 @@ def test_recovery_skipped_when_other_instance_alive(fake_win32print, tmp_path, m
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"pid": 12345, "original_default": "Office Printer",
                                  "default_switched": True}), encoding="utf-8")
-    monkeypatch.setattr(pe, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(pe, "_state_owner_alive", lambda state: True)
     fake_win32print.default = "Target Printer"
     assert pe.recover_pending_state(state) == []
     assert fake_win32print.default == "Target Printer"
@@ -132,3 +132,56 @@ def test_capabilities_paper_lookup(fake_win32print):
     assert caps.supports_duplex and caps.supports_color and caps.supports_landscape
     assert caps.paper_code_for("A3") == 8 and caps.paper_code_for("letter") == 1
     assert caps.paper_code_for("Unknown Paper") is None
+
+
+def test_busy_instance_state_file_is_not_deleted(fake_win32print, tmp_path, monkeypatch):
+    state = tmp_path / "state.json"
+    other = {"pid": 4242, "original_default": "Office Printer", "default_switched": True}
+    state.write_text(json.dumps(other), encoding="utf-8")
+    monkeypatch.setattr(pe, "_state_owner_alive", lambda s: True)
+    with pytest.raises(pe.PrinterEnvironmentBusy):
+        with pe.PrinterEnvironment("Target Printer", _settings(), True, state_file=state):
+            pass
+    assert json.loads(state.read_text(encoding="utf-8")) == other  # 另一个实例的状态文件原样保留
+
+
+def test_failed_recovery_is_inherited_not_overwritten(fake_win32print, tmp_path):
+    state = tmp_path / "state.json"
+    # 上次崩溃：原默认为 Office Printer，当前仍被切换为 Mono Simplex；本次恢复时 SetDefaultPrinter 失败
+    fake_win32print.default = "Mono Simplex"
+    state.write_text(json.dumps({"pid": 999999, "original_default": "Office Printer",
+                                 "default_switched": True}), encoding="utf-8")
+    fake_win32print.fail_set_default = True
+    env = pe.PrinterEnvironment("Target Printer", _settings(), switch_default=True, state_file=state)
+    env.__enter__()
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["original_default"] == "Office Printer"  # 没有被当前的 Mono Simplex 覆盖
+    fake_win32print.fail_set_default = False
+    assert env.restore()
+    assert fake_win32print.default == "Office Printer" and not state.exists()
+
+
+def test_original_default_printer_deleted_is_not_retried_forever(fake_win32print, tmp_path):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"pid": 999999, "original_default": "Removed Printer",
+                                 "default_switched": True}), encoding="utf-8")
+    actions = pe.recover_pending_state(state)
+    assert any("已不存在" in a for a in actions)
+    assert not state.exists()
+
+
+def test_pid_reuse_is_not_treated_as_busy(monkeypatch):
+    """状态文件中的 PID 被其他进程复用：创建时间不一致 → 不是同一个实例"""
+    pytest.importorskip("psutil")
+    import os as _os
+    monkeypatch.setattr(pe, "_process_create_time", lambda pid: 5000.0)
+    assert pe._pid_alive(_os.getppid(), create_time=1.0) is False
+    assert pe._pid_alive(_os.getppid(), create_time=5000.5) is True
+    assert pe._state_owner_alive({"pid": _os.getppid(), "pid_create_time": 1.0}) is False
+
+
+def test_legacy_default_printer_mode_restored(fake_win32print, tmp_path):
+    fake_win32print.legacy_mode = pe._MISSING
+    with pe.PrinterEnvironment("Target Printer", _settings(), True, state_file=tmp_path / "s.json"):
+        fake_win32print.legacy_mode = 1  # SetDefaultPrinter 可能关闭“让 Windows 管理默认打印机”
+    assert fake_win32print.legacy_writes[-1] == pe._MISSING

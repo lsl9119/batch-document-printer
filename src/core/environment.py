@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from ..backends.office_backend import (BackendSelection, ComponentStatus, OfficeKind, com_initialized,
-                                       default_backends, select_backends)
+                                       default_backends, office_automation, select_backends)
 from ..backends import process_utils
 from ..utils import path_utils
 from ..version import APP_NAME, VERSION
@@ -156,7 +156,7 @@ def collect_environment(preference: str = "auto", deep: bool = False) -> Environ
     backends = default_backends()
     statuses: Dict[str, Dict[OfficeKind, ComponentStatus]] = {}
     if deep:
-        with com_initialized():
+        with office_automation(1, "正在打印或统计页数，请完成后再进行深度检测"), com_initialized():
             for backend in backends:
                 statuses[backend.key] = {}
                 for kind in OfficeKind:

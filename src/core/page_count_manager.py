@@ -12,8 +12,10 @@ from enum import Enum
 
 from .models import Document, FileType, OFFICE_FILE_TYPES
 from .print_context import PrintContext
+from contextlib import nullcontext
+
 from ..backends.office_backend import (KIND_BY_FILE_TYPE, OfficeSessionPool, Watchdog,
-                                       com_initialized, detect_backend)
+                                       com_initialized, detect_backend, office_automation)
 from ..handlers import create_default_registry
 
 logger = logging.getLogger("bdp.pagecount")
@@ -95,7 +97,9 @@ class PageCountManager:
         results: List[PageCountResult] = []
         total_docs = len(documents)
         needs_office = any(d.file_type in OFFICE_FILE_TYPES for d in documents)
-        with com_initialized():
+        office_lock = (office_automation(5, "正在打印或检测 WPS，请稍后再统计 Office 文档页数")
+                       if needs_office else nullcontext())
+        with com_initialized(), office_lock:
             pool = None
             if needs_office:
                 pool = OfficeSessionPool(self._backend_detector(self._backend_preference))

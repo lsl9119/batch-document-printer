@@ -280,6 +280,9 @@ class OfficeSession:
         self.app = None
         self.spawned_pids: Set[int] = set()
         self.owned = False           # 进程是否由本程序启动（决定能否 Quit/强制结束）
+        self.mode = ""
+        self._starting = False
+        self._saved_props: Dict[str, object] = {}
         self.jobs_done = 0
         self.dead = False
         self.started_at = 0.0
@@ -292,16 +295,28 @@ class OfficeSession:
     def label(self) -> str:
         return f"{self.backend.component_name(self.kind)}({self.progid})"
 
+    # 会话与进程的关系：
+    #   OWNED        本次创建时出现了新进程 → 完全由本程序管理（隐藏、Quit、超时可强制结束）
+    #   POOL_SHARED  没有新进程，但所有候选进程都是本批次启动的（WPS 整合模式下多个组件共用 wps.exe）
+    #                → 可以隐藏、超时可结束，但由启动该进程的会话负责 Quit
+    #   ATTACHED     复用了用户自己打开的 WPS → 不隐藏窗口、不 Quit、不关闭用户文档、不结束进程，
+    #                只临时关闭提示框并在结束时恢复
+    OWNED, POOL_SHARED, ATTACHED = "owned", "pool_shared", "attached"
+
     def start(self, owned_pids: Optional[Set[int]] = None) -> None:
         """创建 COM 对象并进行静默配置"""
         names = self.backend.all_process_names
         with self._lock:
             self._before = process_utils.snapshot(names)
+            self._starting = True
         t0 = time.monotonic()
         try:
-            self.app = self._create_with_retry()
+            app = self._create_with_retry()
         except Exception as e:  # noqa: BLE001
             self.dead = True
+            self._kill_new_processes("启动失败清理")
+            with self._lock:
+                self._starting = False
             if is_not_registered_error(e):
                 raise OfficeStartError(
                     f"{self.backend.component_name(self.kind)} COM 接口不可用（ProgID: {self.progid} 未注册）。"
@@ -313,22 +328,32 @@ class OfficeSession:
 
         after = process_utils.snapshot(names)
         new_pids = set(after) - set(self._before or {})
+        owned_alive = {pid for pid in (owned_pids or set()) if pid in after}
         with self._lock:
             if new_pids:
-                self.spawned_pids = new_pids
-                self.owned = True
-            elif owned_pids and (set(after) & owned_pids):
-                # 例如 WPS 整合模式下，表格组件复用了本程序刚启动的 wps.exe 进程
-                self.spawned_pids = set(after) & owned_pids
-                self.owned = True
+                self.mode, self.spawned_pids = self.OWNED, new_pids
+            elif not process_utils.tracking_available():
+                # 无法识别进程时按"自己启动"处理（与 Word 的 CreateObject 语义一致）
+                self.mode = self.OWNED
+            elif after and set(after) <= owned_alive:
+                self.mode, self.spawned_pids = self.POOL_SHARED, set(after)
             else:
-                # 无法识别进程时按"自己启动"处理，否则视为复用了用户已打开的实例
-                self.owned = not process_utils.tracking_available()
-        self._log(f"已启动 {self.label}，耗时 {self.started_at - t0:.1f}s，"
-                  f"进程: {sorted(self.spawned_pids) or '未识别（可能复用了已运行的实例）'}")
-        if not self.owned:
-            self._log(f"⚠️ {self.label} 复用了已在运行的实例，结束时不会调用 Quit，超时保护也无法强制结束该进程")
+                self.mode = self.ATTACHED
+            self.owned = self.mode == self.OWNED
+            self.app = app
+            self._starting = False
+        self._log(f"已启动 {self.label}，耗时 {self.started_at - t0:.1f}s，模式 {self.mode}，"
+                  f"进程: {sorted(self.spawned_pids) or '未识别'}")
+        if self.mode == self.ATTACHED:
+            self._log(f"⚠️ {self.label} 复用了用户已打开的 WPS/Office 实例：不会隐藏窗口、不会退出，"
+                      f"超时保护也无法强制结束该进程")
         self._configure()
+
+    def _kill_new_processes(self, reason: str) -> List[int]:
+        if self._before is None:
+            return []
+        pids = process_utils.find_new_pids(self._before, process_names=self.backend.all_process_names)
+        return process_utils.kill_pids(pids, reason=f"[{self.label}] {reason}") if pids else []
 
     def _create_with_retry(self, attempts: int = 3, delay: float = 2.0):
         """
@@ -344,18 +369,29 @@ class OfficeSession:
                 self._log(f"创建 {self.label} 失败（{describe_com_error(e)}），{delay:.0f} 秒后重试")
                 time.sleep(delay)
 
+    def _set(self, name: str, value) -> None:
+        """设置属性；复用用户实例时记录原值以便恢复"""
+        if self.mode == self.ATTACHED and name not in self._saved_props:
+            self._saved_props[name] = safe_get(self.app, name)
+        safe_set(self.app, name, value, self._log)
+
     def _configure(self) -> None:
-        app = self.app
-        safe_set(app, "Visible", False, self._log)
-        safe_set(app, "DisplayAlerts", self.backend.DISPLAY_ALERTS_OFF[self.kind], self._log)
+        if self.mode != self.ATTACHED:
+            self._set("Visible", False)
+            if self.kind in (OfficeKind.WRITER, OfficeKind.SPREADSHEET):
+                self._set("ScreenUpdating", False)
+        self._set("DisplayAlerts", self.backend.DISPLAY_ALERTS_OFF[self.kind])
         if self.kind == OfficeKind.SPREADSHEET:
-            safe_set(app, "ScreenUpdating", False)
-            safe_set(app, "AskToUpdateLinks", False)
-            safe_set(app, "EnableEvents", False)
-        if self.kind == OfficeKind.WRITER:
-            safe_set(app, "ScreenUpdating", False)
+            self._set("AskToUpdateLinks", False)
+            self._set("EnableEvents", False)
         # 禁用宏自动运行（msoAutomationSecurityForceDisable = 3）
-        safe_set(app, "AutomationSecurity", 3)
+        self._set("AutomationSecurity", 3)
+
+    def _restore_props(self, app) -> None:
+        for name, value in self._saved_props.items():
+            if value is not None:
+                safe_set(app, name, value, self._log)
+        self._saved_props.clear()
 
     @property
     def is_alive(self) -> bool:
@@ -366,35 +402,41 @@ class OfficeSession:
         return True
 
     def kill(self, reason: str = "") -> List[int]:
-        """强制结束本会话启动的进程（可在其他线程调用，只做进程操作不碰 COM）"""
+        """强制结束本会话的进程（可在其他线程调用，只做进程操作不碰 COM）"""
         with self._lock:
             self.dead = True
-            pids = set(self.spawned_pids)
-            if not pids and self._before is not None and self.app is None:
-                # 仍在创建 COM 对象（例如卡在首次启动的弹窗）：结束新出现的进程
-                pids = process_utils.find_new_pids(self._before, process_names=self.backend.all_process_names)
+            pids = set(self.spawned_pids) if self.mode != self.ATTACHED else set()
+            starting = self._starting
+        if not pids and starting:
+            # 仍在创建 COM 对象（例如卡在首次启动的弹窗）：结束新出现的进程
+            return self._kill_new_processes(reason)
         if not pids:
             self._log(f"⚠️ {self.label} 无可结束的自有进程（{reason}）")
             return []
         return process_utils.kill_pids(pids, reason=f"[{self.label}] {reason}")
 
     def close(self, quit_timeout: float = 15.0) -> None:
-        """退出应用并确保进程结束；可重复调用"""
-        app, self.app = self.app, None
-        if app is not None and self.owned and not self.dead:
-            try:
-                # 关闭可能残留的文档（不保存）
-                self._close_leftover_documents(app)
-                app.Quit()
-            except Exception as e:  # noqa: BLE001 - 退出失败时走强制结束
-                self._log(f"{self.label} Quit 失败: {describe_com_error(e)}")
+        """退出应用并确保进程结束；可重复调用。Quit 本身卡住时由看门狗强制结束进程"""
+        with self._lock:
+            app, self.app = self.app, None
+        if app is not None and not self.dead:
+            with Watchdog(quit_timeout + 15, lambda: self.kill("关闭/退出超时"), name=f"close-{self.kind.value}"):
+                try:
+                    if self.mode == self.OWNED:
+                        # 关闭可能残留的（本程序打开的）文档，不保存
+                        self._close_leftover_documents(app)
+                        app.Quit()
+                    elif self.mode == self.ATTACHED:
+                        self._restore_props(app)
+                except Exception as e:  # noqa: BLE001 - 退出失败时走强制结束
+                    self._log(f"{self.label} 退出失败: {describe_com_error(e)}")
         del app
         try:
             import pythoncom  # type: ignore
             pythoncom.CoFreeUnusedLibraries()
         except Exception:  # noqa: BLE001 - 非 Windows / 测试环境
             pass
-        if self.owned and self.spawned_pids:
+        if self.mode == self.OWNED and self.spawned_pids:
             leftovers = process_utils.wait_for_exit(self.spawned_pids, quit_timeout)
             if leftovers:
                 process_utils.kill_pids(leftovers, reason=f"[{self.label}] Quit 后 {quit_timeout:.0f}s 仍未退出")
@@ -455,10 +497,15 @@ class OfficeSessionPool:
         session = self._session_factory(backend, kind)
         with self._lock:
             self._sessions[kind] = session
-        session.start(owned_pids=set(self._owned_pids))
         with self._lock:
-            self._owned_pids |= session.spawned_pids if session.owned else set()
-            self.all_spawned_pids |= session.spawned_pids if session.owned else set()
+            # 去掉已退出的进程，避免 PID 被系统复用后误认
+            self._owned_pids = {pid for pid in self._owned_pids if process_utils.pid_exists(pid)}
+            owned = set(self._owned_pids)
+        session.start(owned_pids=owned)
+        with self._lock:
+            if session.owned:
+                self._owned_pids |= session.spawned_pids
+                self.all_spawned_pids |= session.spawned_pids
         return session
 
     def peek(self, kind: OfficeKind) -> Optional[OfficeSession]:
@@ -495,6 +542,25 @@ class OfficeSessionPool:
         leftovers = [pid for pid in self.all_spawned_pids if process_utils.pid_exists(pid)]
         if leftovers:
             process_utils.kill_pids(leftovers, reason="批次结束兜底清理")
+
+
+class OfficeBusyError(RuntimeError):
+    """另一个任务（打印 / 页数统计 / 深度检测）正在使用 WPS/Office 自动化"""
+
+
+# 进程内同一时间只允许一个任务驱动 WPS/Office：多个会话池同时运行时，
+# "进程快照差集"无法区分各自启动的进程，可能误结束对方的 WPS
+OFFICE_AUTOMATION_LOCK = threading.Lock()
+
+
+@contextmanager
+def office_automation(timeout: float, busy_message: str):
+    if not OFFICE_AUTOMATION_LOCK.acquire(timeout=max(0.0, timeout)):
+        raise OfficeBusyError(busy_message)
+    try:
+        yield
+    finally:
+        OFFICE_AUTOMATION_LOCK.release()
 
 
 class Watchdog:
