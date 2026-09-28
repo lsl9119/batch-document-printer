@@ -180,7 +180,7 @@ logs\
 ## Known Issues（已知问题）
 
 - **真实 WPS 环境验证**：v1.0.0 的 WPS COM 调用逻辑已通过 mock 测试和冒烟打包测试，但**尚未在 Windows 10/11 + WPS 的真实环境中完成人工验证**
-  （开发环境没有 Windows/WPS，详见 [RELEASE_NOTES](docs/RELEASE_NOTES.md) 的验证清单）。首次使用建议先用
+  （开发环境没有 Windows/WPS，详见 [验证记录](docs/VERIFICATION.md)）。首次使用建议先用
   `BDP-WPS-Diagnose.exe` 检查 COM，并用“Microsoft Print to PDF”试打几个文件
 - WPS 文字文档的纸张/方向以文档自身页面设置为准（与 Word 行为一致）；强制套用会导致重新排版
 - 双面、彩色依赖打印机驱动读取“每用户默认打印参数”，个别驱动或 WPS 版本可能忽略，此时使用驱动默认值
