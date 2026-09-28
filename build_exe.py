@@ -19,6 +19,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+
+# CI 与英文系统的控制台代码页（如 cp1252）无法输出中文：替换而不是崩溃
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
 from src.version import APP_ID, VERSION  # noqa: E402
 
 DIST = ROOT / "dist"
