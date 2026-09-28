@@ -46,10 +46,10 @@ Office 文档的纸张/方向默认遵循文档自身页面设置，可选择强
 
 | 项目 | 状态 |
 |------|------|
-| 单元测试 + mock 端到端测试（100 项，含队列失败隔离、超时、默认打印机恢复、崩溃恢复、Backend 选择） | ✅ 通过（Linux CPython 3.11 与 Windows CPython 3.11 on Wine） |
+| 单元测试 + mock 端到端测试（111 项，含队列失败隔离、超时、默认打印机恢复、崩溃恢复、Backend 选择） | ✅ 通过（Linux CPython 3.11 与 Windows CPython 3.11 on Wine） |
 | PyInstaller 打包产物启动、界面、环境检测、日志、诊断工具 | ✅ 在 Wine 中运行通过（非真实 Windows） |
 | 真实 COM 生命周期代码（注册表检测、CoCreateInstance、隐藏、Quit、进程识别、看门狗结束进程） | ✅ 在 Wine 中使用其自带的进程外 COM 服务器验证（非 WPS） |
-| PDF / PNG / JPG / BMP / TIFF / TXT 真实打印链路（真实 pywin32 + SumatraPDF + GDI，打印到 CUPS-PDF 虚拟打印机） | ✅ 在 Wine + CUPS-PDF 中通过；默认打印机切换并恢复 |
+| PDF / PNG / JPG / BMP / TXT 真实打印链路（真实 pywin32 + SumatraPDF + GDI，打印到 CUPS-PDF 虚拟打印机） | ✅ 在 Wine + CUPS-PDF 中通过；默认打印机切换并恢复（TIFF：SumatraPDF 在 Wine 中崩溃，GDI 备用方案单独验证可用；Windows 上未验证） |
 | KWPS / KET / KWPP COM 冒烟测试 | ⚠️ **未在真实 WPS 上验证** |
 | DOCX / XLSX / PPTX / WPS / ET / DPS 通过 WPS 打印 | ⚠️ **未在真实 WPS 上验证** |
 | Windows 10 / 11 真机运行 | ⚠️ **未验证** |

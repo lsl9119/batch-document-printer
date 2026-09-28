@@ -10,7 +10,7 @@
 
 ## A. 自动化测试
 
-`python -m pytest -q tests` → 100 passed（Linux CPython 3.11；Windows CPython 3.11 on Wine 同样 100 passed）
+`python -m pytest -q tests` → 111 passed（Linux CPython 3.11；Windows CPython 3.11 on Wine 同样 111 passed）
 
 覆盖：文件类型识别（16 种扩展名）、PrintSettings 兼容旧配置、Backend 检测与回退（WPS 缺表格组件时的提示含
 `ProgID: KET.Application`）、COM 错误分类与降级调用、会话池复用/回收/失效重启、看门狗、只结束自有进程、
@@ -31,10 +31,15 @@ mock 端到端测试（`tests/test_e2e_mocked.py`）：12 个文件（docx/xlsx/
 | `BatchDocumentPrinter-WPS.exe` 启动 | 界面正常、环境检测正常（正确报告 KWPS/KET/KWPP 未注册）、日志写入程序目录、命令行传入文件夹可加入列表 |
 | `BDP-WPS-Diagnose.exe` | 正常运行并报告 3 个组件 FAIL（无 WPS，符合预期）；修复了两个仅在打包/真实 API 下出现的问题（见下） |
 | 真实 COM 生命周期（用 Wine 自带的进程外 COM 服务器 `InternetExplorer.Application` 代替 WPS） | 注册表 ProgID→CLSID→LocalServer32 检测、CoCreateInstance、Visible=False、Quit、进程识别、看门狗强制结束进程、结束后 COM 调用返回“RPC 服务器不可用”并被识别 —— 全部通过 |
-| 真实打印链路（PrintController + SumatraPDF + GDI → CUPS-PDF），打印机 ≠ 默认打印机，份数 2、横向、双面长边、黑白 | PDF/PNG/JPG/BMP 由 SumatraPDF 打印成功；TIFF 在 Wine 中导致 SumatraPDF 崩溃 → 超时结束进程 → 自动改用 GDI 打印成功；TXT（UTF-8、GBK）GDI 打印成功（横向、2 份）；DOCX 因无 WPS 失败并给出含 ProgID 的明确提示，队列继续；批次“成功 7，失败 1” |
+| 真实打印链路（PrintController + SumatraPDF + GDI → CUPS-PDF），打印机 ≠ 默认打印机，份数 2、横向、双面长边、黑白 | PDF/PNG/JPG/BMP 由 SumatraPDF 打印成功；TIFF 在 Wine 中导致 SumatraPDF 崩溃 → 超时后结束进程并报告失败（不自动改用 GDI 重打，避免重复打印；单独调用 GDI 图片打印已验证可用）；TXT（UTF-8、GBK）GDI 打印成功（横向、2 份）；DOCX 因无 WPS 失败并给出含 ProgID 的明确提示，队列继续；批次“成功 6，失败 2”，失败项均符合预期 |
 | 默认打印机 | 批次开始切换为目标打印机，结束后恢复为原默认打印机，恢复状态文件已删除 |
 | 驱动不支持双面 | 记录“双面打印：当前打印机驱动不支持该设置，已使用驱动默认值” |
 | GDI 中文文本 | 使用 TrueType 中文字体时正确输出；程序会核对字体是否真实存在并依次回退 |
+
+独立代码审查（单独的审查代理）发现并已修复：复用用户已打开的 WPS 时会隐藏其窗口/关闭其文档；
+`Quit` 卡住时默认打印机无法恢复；恢复状态文件可能被删除或被覆盖；启动失败的 WPS 进程残留；
+深度检测/页数统计与打印并发驱动 WPS；PID 复用导致误判；日志重定向可能死锁；PDF 超时与看门狗不一致；
+SumatraPDF 超时后 GDI 重打导致重复打印；`SetDefaultPrinter` 可能关闭“让 Windows 管理默认打印机”。
 
 Wine 验证中发现并已修复的真实问题：
 1. `pythoncom.CLSIDFromProgID` 在 pywin32 中不存在（改用 `pywintypes.IID`）—— 仅靠 mock 测试无法发现
