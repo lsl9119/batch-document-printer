@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from src.backends.office_backend import BackendSelection, OfficeKind
+from src.backends.wps_backend import WpsBackend
 from src.core.models import Document, FileType, PrintSettings, PrintStatus
 from src.core.print_context import PrintJobError
 from src.core.print_controller import PrintController
@@ -100,7 +101,7 @@ def _docs(tmp_path, names):
     return docs
 
 
-def _controller(tmp_path, behaviour=None, env=None, pool=None, timeouts=None):
+def _controller(tmp_path, behaviour=None, env=None, pool=None, timeouts=None, selection=None):
     registry = HandlerRegistry()
     handlers = {
         FileType.WORD: FakeHandler(FileType.WORD, {".docx", ".doc", ".wps"}, behaviour),
@@ -114,7 +115,8 @@ def _controller(tmp_path, behaviour=None, env=None, pool=None, timeouts=None):
     pool = pool or FakePool()
     controller = PrintController(
         registry=registry,
-        backend_detector=lambda pref: BackendSelection(),
+        backend_detector=lambda pref: selection if selection is not None else BackendSelection(
+            chosen={k: WpsBackend() for k in OfficeKind}),
         environment_factory=env,
         pool_factory=lambda selection, log: pool,
         timeouts=timeouts,
@@ -245,3 +247,9 @@ def test_callbacks_receive_status_changes(tmp_path):
     _run(controller, _docs(tmp_path, ["a.pdf"]))
     assert ("a.pdf", PrintStatus.PRINTING) in seen and ("a.pdf", PrintStatus.COMPLETED) in seen
     assert finished and finished[0].success == 1
+
+
+def test_no_default_switch_when_no_office_backend_available(tmp_path):
+    controller, _, env, _ = _controller(tmp_path, selection=BackendSelection())
+    _run(controller, _docs(tmp_path, ["a.docx", "b.pdf"]))
+    assert env.switch_default is False

@@ -231,8 +231,11 @@ class PrintController:
 
             with com_initialized():
                 pool = None
+                switch_default = False
                 if has_office:
                     selection = self._backend_detector(settings.office_backend.value)
+                    # 没有任何可用的 Office 组件时，Office 文件都会失败，无需切换默认打印机
+                    switch_default = bool(getattr(selection, "any_available", True))
                     pool = self._pool_factory(selection, self._log)
                     self._active_pool = pool
                     for kind in OfficeKind:
@@ -240,7 +243,7 @@ class PrintController:
                         self._log(f"Office 组件 {kind.value}: {message.splitlines()[0] if message else ''}")
                     ctx.office_pool = pool
                 try:
-                    with self._environment_factory(settings.printer_name, settings, has_office, self._log) as env:
+                    with self._environment_factory(settings.printer_name, settings, switch_default, self._log) as env:
                         ctx.default_printer_switched = bool(getattr(env, "default_switched", False))
                         summary.warnings = list(getattr(env, "warnings", []) or [])
                         for warning in summary.warnings:
