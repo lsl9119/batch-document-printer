@@ -12,7 +12,7 @@ from src.backends.office_backend import BackendSelection, OfficeKind
 from src.backends.wps_backend import WpsBackend
 from src.core.models import Document, FileType, PrintSettings, PrintStatus
 from src.core.print_context import PrintJobError
-from src.core.print_controller import PrintController
+from src.core.print_controller import INTER_JOB_DELAY, PrintController
 from src.core.printer_environment import PrinterEnvironmentBusy
 from src.handlers.handler_registry import HandlerRegistry
 from src.handlers.base_handler import BaseDocumentHandler
@@ -101,7 +101,8 @@ def _docs(tmp_path, names):
     return docs
 
 
-def _controller(tmp_path, behaviour=None, env=None, pool=None, timeouts=None, selection=None):
+def _controller(tmp_path, behaviour=None, env=None, pool=None, timeouts=None, selection=None,
+                inter_job_delay=0):
     registry = HandlerRegistry()
     handlers = {
         FileType.WORD: FakeHandler(FileType.WORD, {".docx", ".doc", ".wps"}, behaviour),
@@ -121,7 +122,7 @@ def _controller(tmp_path, behaviour=None, env=None, pool=None, timeouts=None, se
         pool_factory=lambda selection, log: pool,
         timeouts=timeouts,
         logs_dir=tmp_path,
-        inter_job_delay=0,
+        inter_job_delay=inter_job_delay,
     )
     controller.set_print_settings(PrintSettings(printer_name="Target Printer", copies=2))
     return controller, handlers, env, pool
@@ -215,6 +216,57 @@ def test_cancel_marks_remaining_as_cancelled(tmp_path):
     summary = future.result(timeout=10)
     assert summary.success == 1 and summary.cancelled == 2
     assert docs[2].print_status == PrintStatus.CANCELLED
+
+
+def test_documents_submitted_one_by_one_with_delay(tmp_path):
+    assert INTER_JOB_DELAY == 0.5
+    controller, handlers, *_ = _controller(tmp_path, inter_job_delay=INTER_JOB_DELAY)
+    spans = []
+    lock = threading.Lock()
+    active = []
+
+    def timed(file_path, settings, context=None):
+        with lock:
+            active.append(file_path.name)
+            assert len(active) == 1, "不应同时提交多个文档"
+        start = time.monotonic()
+        time.sleep(0.05)
+        with lock:
+            active.remove(file_path.name)
+        spans.append((start, time.monotonic()))
+        return True
+
+    for handler in handlers.values():
+        handler.print_document = timed
+    started = time.monotonic()
+    summary = _run(controller, _docs(tmp_path, ["a.pdf", "b.docx", "c.xlsx"]))
+    assert summary.success == 3
+    gaps = [spans[i + 1][0] - spans[i][1] for i in range(len(spans) - 1)]
+    assert all(gap >= INTER_JOB_DELAY - 0.01 for gap in gaps), gaps
+    # 第一个文档不等待，最后一个文档之后也不等待
+    assert spans[0][0] - started < INTER_JOB_DELAY
+    assert summary.elapsed < INTER_JOB_DELAY * 2 + 0.4
+
+
+def test_cancel_interrupts_inter_job_delay(tmp_path):
+    controller, handlers, *_ = _controller(tmp_path, inter_job_delay=30)
+    first_done = threading.Event()
+    original = handlers[FileType.PDF].print_document
+
+    def notify(file_path, settings, context=None):
+        result = original(file_path, settings, context)
+        first_done.set()
+        return result
+
+    handlers[FileType.PDF].print_document = notify
+    docs = _docs(tmp_path, ["1.pdf", "2.pdf"])
+    controller.add_documents_to_queue(docs)
+    future = controller.start_batch_print()
+    assert first_done.wait(5)
+    controller.cancel_current_print()
+    summary = future.result(timeout=5)
+    assert summary.success == 1 and summary.cancelled == 1
+    assert docs[1].print_status == PrintStatus.CANCELLED
 
 
 def test_environment_busy_fails_batch_gracefully(tmp_path):

@@ -3,6 +3,7 @@
 
 职责：
 - 顺序执行打印队列，单个文件失败不会中断整个队列
+- 逐个提交给打印机：上一个文件提交完成后间隔 INTER_JOB_DELAY 秒再提交下一个，不并发提交
 - 为 Office 文档维护 WPS/Office 会话池（复用实例，批次结束统一退出并清理进程）
 - 每个任务都有看门狗超时：WPS 卡死时强制结束本程序启动的 WPS 进程并继续下一个文件
 - 批次期间临时设置打印机环境（每用户打印参数 + 必要时临时切换默认打印机），结束后恢复
@@ -37,6 +38,9 @@ DEFAULT_TIMEOUTS = {
     OfficeKind.PRESENTATION: 300,
     None: 960,   # PDF/图片/文本：必须大于 SumatraPDF 自身的最大超时（900 秒）
 }
+
+# 相邻两个文档提交给打印机之间的间隔（秒）
+INTER_JOB_DELAY = 0.5
 
 
 @dataclass
@@ -104,7 +108,7 @@ class PrintController:
 
     def __init__(self, registry=None, backend_detector=None, environment_factory=None,
                  pool_factory=None, timeouts=None, logs_dir: Optional[Path] = None,
-                 inter_job_delay: float = 0.3):
+                 inter_job_delay: float = INTER_JOB_DELAY):
         self._print_queue: List[Document] = []
         self._current_settings: Optional[PrintSettings] = None
         self._is_printing = False
@@ -294,6 +298,9 @@ class PrintController:
                    pool: Optional[OfficeSessionPool], summary: BatchSummary) -> None:
         total = len(documents)
         for index, document in enumerate(documents):
+            # 文档之间间隔一段时间再提交，避免短时间内连续向打印机投递多个任务；取消时立即结束等待
+            if index > 0 and self._inter_job_delay > 0:
+                self._cancel_event.wait(self._inter_job_delay)
             if self._cancel_event.is_set():
                 for rest in documents[index:]:
                     rest.print_status = PrintStatus.CANCELLED
@@ -310,8 +317,6 @@ class PrintController:
                 summary.success += 1
             else:
                 summary.failed += 1
-            if self._inter_job_delay:
-                time.sleep(self._inter_job_delay)
 
     def _make_record(self, document: Document, settings: PrintSettings, backend: str, success: bool,
                      error: str, elapsed: float, notes: List[str], status: str = "") -> TaskRecord:
