@@ -36,7 +36,7 @@ class PDFDocumentHandler(BaseDocumentHandler):
         printer = settings.printer_name or _default_printer()
         if not printer:
             raise PrintJobError("未设置打印机，且系统没有默认打印机")
-        used = sumatra.run_print(file_path, printer, settings, context.log)
+        used = sumatra.run_print_verified(file_path, printer, settings, context)
         context.notes.append(f"print-settings={used}")
         return True
 

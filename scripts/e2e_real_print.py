@@ -55,6 +55,14 @@ def pdf_info(path: Path) -> dict:
     return {"pages": len(pages), "page_sizes": pages}
 
 
+def make_camera_photo(path: Path) -> None:
+    from PIL import Image
+    img = Image.linear_gradient("L").resize((6000, 4000)).convert("RGB")
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    img.save(path, "JPEG", quality=90, exif=exif.tobytes())
+
+
 def make_native_files(samples: Path, out_dir: Path, log) -> list:
     """用 WPS 把 docx/xlsx/pptx 另存为 WPS 原生格式 .wps/.et/.dps"""
     from src.backends.office_backend import OfficeKind, OfficeSession, com_initialized
@@ -131,11 +139,22 @@ def main() -> int:
         dest = work / name.replace("sample", "样例 文件")
         shutil.copy(args.samples / name, dest)
         files.append(dest)
+    # 模拟手机照片：6000x4000、EXIF 方向=6（需旋转 90°）——验证预处理（转正 + 缩小）后 SumatraPDF 正常出纸
+    photo = work / "IMG20260323151344 手机照片.jpg"
+    make_camera_photo(photo)
+    files.append(photo)
     corrupt = work / "损坏的文档.docx"
     corrupt.write_bytes(b"this is not a docx file")
     files.append(corrupt)
     if args.native:
         files.extend(make_native_files(args.samples, work, log))
+
+    from src.core.spool_monitor import create_spool_tracker
+    tracker = create_spool_tracker(args.printer, log)
+    spool_reliable = bool(tracker and tracker.reliable)
+    log(f"打印队列监视: {'变更通知（可靠）' if spool_reliable else ('轮询' if tracker else '不可用')}")
+    if tracker is not None:
+        tracker.stop()
 
     initial_default = get_default_printer()
     before = process_utils.snapshot(WPS_PROCS)
@@ -211,8 +230,13 @@ def main() -> int:
         "default_printer_after": final_default,
         "default_printer_restored": initial_default == final_default,
         "leftover_wps_processes": leftovers,
+        "spool_monitor_reliable": spool_reliable,
         "results": results,
     }
+    for record in summary.records:
+        name = Path(record.file).name
+        if name in results:
+            results[name]["notes"] = record.notes
     (args.out_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("\n================ 结果 ================")
@@ -223,7 +247,7 @@ def main() -> int:
     print(f"默认打印机恢复: {report['default_printer_restored']} ({initial_default} -> {final_default})")
     print(f"残留 WPS 进程: {leftovers or '无'}")
 
-    ok = report["default_printer_restored"] and not leftovers
+    ok = report["default_printer_restored"] and not leftovers and spool_reliable
     office_exts = (".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt", ".wps", ".et", ".dps")
     for entry in results.values():
         expected_fail = entry["file"] == corrupt.name or (
@@ -232,6 +256,12 @@ def main() -> int:
             ok = ok and entry["status"] == "error"
         else:
             ok = ok and entry["status"] == "completed" and bool(entry.get("pages"))
+            # 打印队列监视必须确认到任务（否则说明真实 Windows 上的检测逻辑有问题）
+            ok = ok and "未能确认任务已进入打印队列" not in entry.get("notes", [])
+    photo_entry = results.get(photo.name, {})
+    photo_notes = " ".join(photo_entry.get("notes", []))
+    print(f"手机照片: 备注={photo_notes} 页面={photo_entry.get('page_sizes')}")
+    ok = ok and "缩小 6000x4000" in photo_notes and "转正" in photo_notes
     print("E2E RESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

@@ -34,6 +34,10 @@ class ExternalPrintTimeout(PrintJobError):
     """外部打印程序超时：作业可能已部分进入打印队列，不应自动换用其他方式重打"""
 
 
+class NoJobSubmitted(PrintJobError):
+    """外部打印程序正常退出，但打印队列中没有出现任何任务（打印机什么也没收到）"""
+
+
 def kill_active(reason: str = "") -> None:
     with _active_lock:
         procs = list(_active)
@@ -97,6 +101,25 @@ def run_print(file_path: Path, printer_name: str, settings: PrintSettings, log=N
     if returncode != 0:
         raise PrintJobError(f"SumatraPDF 打印失败（退出码 {returncode}）: {detail[:300] or '无输出'}")
     return cmd[4]
+
+
+def run_print_verified(file_path: Path, printer_name: str, settings: PrintSettings, context) -> str:
+    """
+    执行打印，并通过 context.spool（打印队列监视器）确认任务确实进入了打印队列。
+
+    SumatraPDF 在部分图片上会直接退出且返回 0，实际却没有生成打印任务；这种情况抛出 NoJobSubmitted。
+    无法监视打印队列时（context.spool 为 None）行为与 run_print 相同。
+    """
+    spool = getattr(context, "spool", None)
+    mark = spool.checkpoint() if spool is not None else None
+    used = run_print(file_path, printer_name, settings, context.log)
+    if spool is not None:
+        submitted = spool.submitted_since(mark)
+        if submitted is False:
+            raise NoJobSubmitted("SumatraPDF 已退出，但打印队列中没有出现打印任务（打印机未收到任何内容）")
+        if submitted is None:
+            context.notes.append("未能确认任务已进入打印队列")
+    return used
 
 
 def run_detached(cmd: List[str], timeout: float):

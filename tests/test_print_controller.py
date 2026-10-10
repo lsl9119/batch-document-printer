@@ -102,7 +102,7 @@ def _docs(tmp_path, names):
 
 
 def _controller(tmp_path, behaviour=None, env=None, pool=None, timeouts=None, selection=None,
-                inter_job_delay=0):
+                inter_job_delay=0, spool_tracker_factory=lambda printer, log: None):
     registry = HandlerRegistry()
     handlers = {
         FileType.WORD: FakeHandler(FileType.WORD, {".docx", ".doc", ".wps"}, behaviour),
@@ -123,6 +123,7 @@ def _controller(tmp_path, behaviour=None, env=None, pool=None, timeouts=None, se
         timeouts=timeouts,
         logs_dir=tmp_path,
         inter_job_delay=inter_job_delay,
+        spool_tracker_factory=spool_tracker_factory,
     )
     controller.set_print_settings(PrintSettings(printer_name="Target Printer", copies=2))
     return controller, handlers, env, pool

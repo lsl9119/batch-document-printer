@@ -23,6 +23,8 @@ class PrintContext:
     log: Callable[[str], None] = field(default=lambda msg: logger.info(msg))
     cancel_event: threading.Event = field(default_factory=threading.Event)
     default_printer_switched: bool = False
+    # 当前任务的打印队列监视器（SpoolTracker），无法监视时为 None；由控制器为每个任务设置
+    spool: Optional[object] = None
     # 以下为单个任务级别的信息，每个任务开始前由控制器重置
     backend_used: str = ""
     notes: List[str] = field(default_factory=list)

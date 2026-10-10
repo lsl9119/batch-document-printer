@@ -3,7 +3,8 @@
 
 职责：
 - 顺序执行打印队列，单个文件失败不会中断整个队列
-- 逐个提交给打印机：上一个文件提交完成后间隔 INTER_JOB_DELAY 秒再提交下一个，不并发提交
+- 逐个提交给打印机：等上一个文件的打印任务离开 Windows 打印队列（已发送到打印机）后，
+  再间隔 INTER_JOB_DELAY 秒提交下一个，不并发提交
 - 为 Office 文档维护 WPS/Office 会话池（复用实例，批次结束统一退出并清理进程）
 - 每个任务都有看门狗超时：WPS 卡死时强制结束本程序启动的 WPS 进程并继续下一个文件
 - 批次期间临时设置打印机环境（每用户打印参数 + 必要时临时切换默认打印机），结束后恢复
@@ -29,6 +30,7 @@ from ..utils.logging_setup import append_print_log, get_print_log_path
 from .models import OFFICE_FILE_TYPES, Document, FileType, PrintSettings, PrintStatus
 from .print_context import PrintCancelled, PrintContext, PrintJobError
 from .printer_environment import PrinterEnvironment, PrinterEnvironmentBusy, get_default_printer
+from .spool_monitor import JOB_DONE_TIMEOUT, SUBMIT_GRACE, create_spool_tracker
 
 logger = logging.getLogger("bdp.print")
 
@@ -108,7 +110,8 @@ class PrintController:
 
     def __init__(self, registry=None, backend_detector=None, environment_factory=None,
                  pool_factory=None, timeouts=None, logs_dir: Optional[Path] = None,
-                 inter_job_delay: float = INTER_JOB_DELAY):
+                 inter_job_delay: float = INTER_JOB_DELAY, spool_tracker_factory=None,
+                 job_done_timeout: float = JOB_DONE_TIMEOUT):
         self._print_queue: List[Document] = []
         self._current_settings: Optional[PrintSettings] = None
         self._is_printing = False
@@ -124,6 +127,8 @@ class PrintController:
             self._timeouts.update(timeouts)
         self._logs_dir = logs_dir
         self._inter_job_delay = inter_job_delay
+        self._spool_tracker_factory = spool_tracker_factory or create_spool_tracker
+        self._job_done_timeout = job_done_timeout
         self._active_pool: Optional[OfficeSessionPool] = None
 
         self._print_progress_callback: Optional[Callable[[int, int, str], None]] = None
@@ -357,6 +362,8 @@ class PrintController:
                 sumatra.kill_active("打印超时")
 
         watchdog = Watchdog(timeout, _on_timeout, name=document.file_name)
+        tracker = self._start_spool_tracker(settings.printer_name)
+        ctx.spool = tracker
         try:
             if not document.file_path.exists():
                 raise PrintJobError("文件不存在或无法访问（可能已被移动/删除，或网络共享已断开）")
@@ -379,6 +386,13 @@ class PrintController:
             component = kind.value if kind else "打印程序"
             error = (f"操作超时（超过 {timeout} 秒无响应），已强制结束本程序启动的 {component} 进程"
                      + (f"；{error}" if error and error != "打印超时" else ""))
+        if tracker is not None:
+            try:
+                if not error:
+                    self._wait_spool_done(document, tracker, ctx)
+            finally:
+                tracker.stop()
+                ctx.spool = None
 
         elapsed = time.monotonic() - start
         success = not error
@@ -391,6 +405,38 @@ class PrintController:
         (logger.info if success else logger.error)(record.to_log_line())
         self._notify_document(document)
         return record
+
+    def _start_spool_tracker(self, printer_name: str):
+        """为当前任务启动打印队列监视；无法监视时返回 None（不影响打印）"""
+        if not printer_name:
+            return None
+        try:
+            tracker = self._spool_tracker_factory(printer_name, self._log)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("创建打印队列监视失败: %s", e)
+            return None
+        if tracker is None:
+            return None
+        try:
+            return tracker.start()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("启动打印队列监视失败: %s", e)
+            tracker.stop()
+            return None
+
+    def _wait_spool_done(self, document: Document, tracker, ctx: PrintContext) -> None:
+        """等本文档的打印任务离开打印队列（已发送到打印机）后再继续下一个文档"""
+        # WPS 等程序可能在打印调用返回后才把任务放进队列：给一个短暂的宽限期
+        if tracker.submitted_since((0, 0), grace=SUBMIT_GRACE) is not True or not tracker.job_ids:
+            return
+        self._log(f"等待打印队列发送完成: {document.file_name}")
+        begin = time.monotonic()
+        done = tracker.wait_done(self._job_done_timeout, self._cancel_event)
+        waited = time.monotonic() - begin
+        if done is True:
+            ctx.notes.append(f"已等待打印队列发送完成 {waited:.1f}s")
+        elif done is False and not self._cancel_event.is_set():
+            ctx.notes.append(f"等待打印队列超过 {self._job_done_timeout:.0f}s，任务仍在队列中，继续下一个文件")
 
     # ------------------------------------------------------------------ 查询
     def get_print_queue_status(self) -> dict:

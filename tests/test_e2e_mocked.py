@@ -76,6 +76,7 @@ def world(tmp_path, monkeypatch, fake_win32print):
             printer, settings, switch_default=switch, state_file=state_file, log=log),
         logs_dir=tmp_path / "logs",
         inter_job_delay=0,
+        spool_tracker_factory=lambda printer, log: None,
     )
     (tmp_path / "logs").mkdir()
     return dict(controller=controller, apps=apps, table=table, sumatra=sumatra_calls, gdi=gdi_calls,
